@@ -1,0 +1,3 @@
+[submodule "foundry/lib/chainlink"]
+	path = foundry/lib/chainlink
+	url = https://github.com/smartcontractkit/chainlink
