@@ -9,16 +9,18 @@ import {ERC721} from "@openzeppelin/token/ERC721/ERC721.sol";
 import {VRFConsumerBaseV2} from "@chainlink/vrf/VRFConsumerBaseV2.sol";
 import {VRFCoordinatorV2Interface} from "@chainlink/vrf/interfaces/VRFCoordinatorV2Interface.sol";
 
-import {TokenBoundAccounts} from "./token/ERC6551/TokenBoundAccounts.sol";
+import {ERC721ConsecutiveMint} from "./token/ERC721/ERC721ConsecutiveMint.sol";
 
 import {ILinkagotchi} from "./ILinkagotchi.sol";
 
-contract Linkagotchi is ILinkagotchi, TokenBoundAccounts, VRFConsumerBaseV2 {
+contract Linkagotchi is ILinkagotchi, ERC721ConsecutiveMint, VRFConsumerBaseV2 {
     struct TokenData {
         uint256 lifeCycle;
         uint256 species;
+
         uint256 hunger;
         uint256 hungerTimestamp;
+
         uint256 sickness;
         uint256 sicknessBlockstamp;
     }
@@ -31,13 +33,15 @@ contract Linkagotchi is ILinkagotchi, TokenBoundAccounts, VRFConsumerBaseV2 {
 
     mapping(uint256 => TokenData) private _tokens;
 
+    uint256 public immutable blockMultiplier;
+
     uint256 public constant FEED_FEE = 1;
     uint256 public constant MEDICINE_FEE = 1;
 
     uint256 private constant _MAX_HUNGER = 108000;
 
     uint256 private constant _MAX_SICKNESS = 100;
-    uint256 private constant _SICKNESS_RATE = 5000;
+    uint256 private _sicknessRate = 2500;
     uint256 private constant _SICKNESS_CHANCE = 10;
     uint256 private constant _SICKNESS_AMOUNT = 15;
     uint256 private constant _SICKNESS_HUNGER_MULTIPLIER = 2;
@@ -46,27 +50,38 @@ contract Linkagotchi is ILinkagotchi, TokenBoundAccounts, VRFConsumerBaseV2 {
     uint256[] private _speciesLengths;
 
     constructor(
-        address accountRegistry, 
-        address accountImplementation, 
-        uint256 accountChainId,
+        uint256 blockMulti,
         address linkToken,
         address vrfCoordinator
     ) ERC721(
         "Linkgotchi", 
         "LINKGOTCHI"
-    ) TokenBoundAccounts(
-        accountRegistry, 
-        accountImplementation, 
-        accountChainId
     ) VRFConsumerBaseV2(
         vrfCoordinator
     ) {
+        blockMultiplier = blockMulti;
+
+        _sicknessRate *= blockMultiplier;
+
         _linkToken = linkToken;
         _vrfCoordinator = vrfCoordinator;
 
         _speciesLengths = [
             5
         ];
+    }
+
+    function debugMint(address receiver) external returns (uint256 requestId, uint256 id) {    
+        id = _nextTokenId();
+        requestId = id;
+
+        _vrfTokenIds[id] = id;
+
+        _consecutiveMint(receiver);
+    }
+
+    function debugFulfillRandomWords(uint256 requestId, uint256 randomWords) external {
+        _newToken(_vrfTokenIds[requestId], randomWords);
     }
 
     /**
@@ -76,9 +91,8 @@ contract Linkagotchi is ILinkagotchi, TokenBoundAccounts, VRFConsumerBaseV2 {
 
         @return requestId ID of the VRF request
         @return id ID of the minted token
-        @return account Account bound to the minted token
     */
-    function mint(address receiver) external returns (uint256 requestId, uint256 id, address account) {      
+    function mint(address receiver) external override returns (uint256 requestId, uint256 id) {      
         id = _nextTokenId();
 
         requestId = VRFCoordinatorV2Interface(_vrfCoordinator).requestRandomWords(
@@ -90,7 +104,7 @@ contract Linkagotchi is ILinkagotchi, TokenBoundAccounts, VRFConsumerBaseV2 {
         );
         _vrfTokenIds[requestId] = id;
 
-        (,account) = _mintTokenAccount("", receiver);
+        _consecutiveMint(receiver);
     }
 
     /**
@@ -148,8 +162,8 @@ contract Linkagotchi is ILinkagotchi, TokenBoundAccounts, VRFConsumerBaseV2 {
             Base64.encode(abi.encodePacked(
                 '{"name":"Linkagotchi #',
                 Strings.toString(id),
-                '","description":"Germz are based","image":"',
-                _tokenSvg(_tokenSvgHash(id)),
+                '","description":"Take care of your Linkagotchi anon!","image":"data:image/svg+xml;base64,',
+                Base64.encode(bytes(_tokenSvg(_tokenSvgHash(id)))),
                 '","attributes":',
                 _tokenAttributes(id),
                 '}'
@@ -201,10 +215,10 @@ contract Linkagotchi is ILinkagotchi, TokenBoundAccounts, VRFConsumerBaseV2 {
 
     function _sickness(uint256 id) internal view returns (uint256 sickness) {
         sickness = _tokens[id].sickness;
-        uint256 checks = (block.number - _tokens[id].sicknessBlockstamp) / _SICKNESS_RATE;
+        uint256 checks = (block.number - _tokens[id].sicknessBlockstamp) / _sicknessRate;
 
         for(uint256 i; i < checks; i++) {
-            uint256 random = _blockhashRandom(id, _tokens[id].sicknessBlockstamp + (i * _SICKNESS_RATE));
+            uint256 random = _blockhashRandom(id, _tokens[id].sicknessBlockstamp + (i * _sicknessRate));
 
             if(random % _SICKNESS_CHANCE == 0 || sickness > 0) {
                 uint256 hungerMultiplier = ((_hunger(id) * _SICKNESS_HUNGER_SCALE) / _MAX_HUNGER) * _SICKNESS_HUNGER_MULTIPLIER;
@@ -250,6 +264,7 @@ contract Linkagotchi is ILinkagotchi, TokenBoundAccounts, VRFConsumerBaseV2 {
 
         return string(abi.encodePacked(
             "<svg id='linkagotchi-svg' xmlns='http://www.w3.org/2000/svg' preserveAspectRatio='xMinYMin meet' viewBox='0 0 16 16'><style>#linkagotchi-svg{shape-rendering: crispedges;}.w0{fill:#000000}.w1{fill:#FFFFFF}.w2{fill:#FF0000}.w3{fill:#00FF00}.w4{fill:#0000FF}.w5{fill:#00FFFF}.w6{fill:#FFFF00}.w7{fill:#FF00FF}</style>", 
+            "<rect class='w0' x='0' y='0' width='16' height='16'/>",
             rects,
             "</svg>"
         ));

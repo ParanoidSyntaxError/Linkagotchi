@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 interface ILinkagotchi {
-    function mint(address receiver) external returns (uint256 requestId, uint256 id, address account);
+    function mint(address receiver) external returns (uint256 requestId, uint256 id);
 
     function feed(uint256 id, uint256 amount) external;
     function medicine(uint256 id, uint256 amount) external;

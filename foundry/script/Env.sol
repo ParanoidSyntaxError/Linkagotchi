@@ -9,6 +9,6 @@ contract Env is Test {
     Linkagotchi public linkagotchi;
 
     function setUp() public {
-        linkagotchi = new Linkagotchi(address(0), address(0), 0, address(0), address(0));
+        linkagotchi = new Linkagotchi(2, address(0), address(0));
     }
 }

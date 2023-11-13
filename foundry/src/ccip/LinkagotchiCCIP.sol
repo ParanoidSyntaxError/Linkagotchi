@@ -5,13 +5,16 @@ import {IRouterClient} from "@ccip/ccip/interfaces/IRouterClient.sol";
 import {Client} from "@ccip/ccip/libraries/Client.sol";
 import {CCIPReceiver, IAny2EVMMessageReceiver} from "@ccip/ccip/applications/CCIPReceiver.sol";
 
+import {Ownable} from "@openzeppelin/access/Ownable.sol";
 import {ERC721, IERC721} from "@openzeppelin/token/ERC721/ERC721.sol";
 import {IERC20} from "@openzeppelin/token/ERC20/IERC20.sol";
 import {IERC165} from "@openzeppelin/utils/introspection/IERC165.sol";
 
 import {Linkagotchi} from "../Linkagotchi.sol";
 
-contract LinkagotchiCCIP is CCIPReceiver, Linkagotchi {
+import {ILinkagotchiCCIP} from "./ILinkagotchiCCIP.sol";
+
+contract LinkagotchiCCIP is ILinkagotchiCCIP, CCIPReceiver, Linkagotchi, Ownable {
     struct MessageData {
         uint256 tokenId;
         address tokenReceiver;
@@ -21,18 +24,14 @@ contract LinkagotchiCCIP is CCIPReceiver, Linkagotchi {
     mapping(uint64 => address) internal _linkagotchiContracts;
 
     constructor(
-        address accountRegistry, 
-        address accountImplementation, 
-        uint256 accountChainId,
+        uint256 blockMulti,
         address linkToken,
         address vrfCoordinator,
         address ccipRouter
     ) CCIPReceiver(
         ccipRouter
     ) Linkagotchi(
-        accountRegistry, 
-        accountImplementation, 
-        accountChainId,
+        blockMulti,
         linkToken,
         vrfCoordinator
     ) {}
@@ -43,6 +42,14 @@ contract LinkagotchiCCIP is CCIPReceiver, Linkagotchi {
             interfaceId == type(IERC721).interfaceId ||
             interfaceId == type(IERC165).interfaceId
         );
+    }
+
+    function setLinkagotchiContract(uint64 destinationChainSelector, address linkagotchi) external onlyOwner() {
+        _linkagotchiContracts[destinationChainSelector] = linkagotchi;
+    }
+
+    function getLinkagotchiContract(uint64 destinationChainSelector) external view returns (address) {
+        return _linkagotchiContracts[destinationChainSelector];
     }
 
     function ccipTransfer(uint256 id, address receiver, uint64 destinationChainSelector, address feeToken) external payable returns (bytes32) {
