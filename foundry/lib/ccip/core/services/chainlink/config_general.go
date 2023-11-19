@@ -3,6 +3,7 @@ package chainlink
 import (
 	_ "embed"
 	"fmt"
+	"math/big"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -288,6 +289,10 @@ func (g *generalConfig) FeatureCCIP() bool {
 	return *g.c.Feature.CCIP
 }
 
+func (g *generalConfig) FeatureLegacyGasStation() bool {
+	return *g.c.Feature.LegacyGasStation
+}
+
 func (g *generalConfig) FeatureUICSAKeys() bool {
 	return *g.c.Feature.UICSAKeys
 }
@@ -314,6 +319,15 @@ func (g *generalConfig) EVMRPCEnabled() bool {
 		}
 	}
 	return false
+}
+
+func (g *generalConfig) DefaultChainID() *big.Int {
+	for _, c := range g.c.EVM {
+		if c.IsEnabled() {
+			return (*big.Int)(c.ChainID)
+		}
+	}
+	return nil
 }
 
 func (g *generalConfig) SolanaEnabled() bool {
@@ -401,6 +415,18 @@ func (g *generalConfig) Database() coreconfig.Database {
 
 func (g *generalConfig) ShutdownGracePeriod() time.Duration {
 	return g.c.ShutdownGracePeriod.Duration()
+}
+
+func (g *generalConfig) Explorer() config.Explorer {
+	return &explorerConfig{s: g.secrets.Explorer, explorerURL: g.c.ExplorerURL}
+}
+
+func (g *generalConfig) ExplorerURL() *url.URL {
+	u := (*url.URL)(g.c.ExplorerURL)
+	if *u == zeroURL {
+		u = nil
+	}
+	return u
 }
 
 func (g *generalConfig) FluxMonitor() config.FluxMonitor {
@@ -496,6 +522,13 @@ func (g *generalConfig) Sentry() coreconfig.Sentry {
 
 func (g *generalConfig) Password() coreconfig.Password {
 	return &passwordConfig{keystore: g.keystorePassword, vrf: g.vrfPassword}
+}
+
+func (g *generalConfig) LegacyGasStation() coreconfig.LegacyGasStation {
+	if g.secrets.LegacyGasStation.AuthConfig == nil {
+		return nil
+	}
+	return &legacyGasStationConfig{s: g.secrets.LegacyGasStation}
 }
 
 func (g *generalConfig) Prometheus() coreconfig.Prometheus {

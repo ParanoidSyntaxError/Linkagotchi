@@ -94,12 +94,6 @@ type (
 	}
 )
 
-func (t *OCRContractTracker) HealthReport() map[string]error {
-	return map[string]error{t.Name(): t.Healthy()}
-}
-
-func (t *OCRContractTracker) Name() string { return t.logger.Name() }
-
 // NewOCRContractTracker makes a new OCRContractTracker
 func NewOCRContractTracker(
 	contract *offchain_aggregator_wrapper.OffchainAggregator,
@@ -399,7 +393,7 @@ func (t *OCRContractTracker) LatestBlockHeight(ctx context.Context) (blockheight
 		// care about the block height; we have no way of getting the L1 block
 		// height anyway
 		return 0, nil
-	case "", config.ChainArbitrum, config.ChainXDai, config.ChainKroma, config.ChainWeMix:
+	case "", config.ChainArbitrum, config.ChainXDai:
 		// continue
 	}
 	latestBlockHeight := t.getLatestBlockHeight()

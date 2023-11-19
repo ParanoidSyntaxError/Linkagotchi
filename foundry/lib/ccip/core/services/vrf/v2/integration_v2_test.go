@@ -128,22 +128,22 @@ type coordinatorV2Universe struct {
 }
 
 const (
-	ConfirmedEthTxesV2Query = `SELECT * FROM evm.txes
-		WHERE evm.txes.state = 'confirmed'
-		AND evm.txes.meta->>'RequestID' = $1
-		AND CAST(evm.txes.meta->>'SubId' AS NUMERIC) = $2 LIMIT 1`
-	ConfirmedEthTxesV2PlusQuery = `SELECT * FROM evm.txes
-		WHERE evm.txes.state = 'confirmed'
-		AND evm.txes.meta->>'RequestID' = $1
-		AND CAST(evm.txes.meta->>'GlobalSubId' AS NUMERIC) = $2 LIMIT 1`
+	ConfirmedEthTxesV2Query = `SELECT * FROM eth_txes
+		WHERE eth_txes.state = 'confirmed'
+		AND eth_txes.meta->>'RequestID' = $1
+		AND CAST(eth_txes.meta->>'SubId' AS NUMERIC) = $2 LIMIT 1`
+	ConfirmedEthTxesV2PlusQuery = `SELECT * FROM eth_txes
+		WHERE eth_txes.state = 'confirmed'
+		AND eth_txes.meta->>'RequestID' = $1
+		AND CAST(eth_txes.meta->>'GlobalSubId' AS NUMERIC) = $2 LIMIT 1`
 	ConfirmedEthTxesV2BatchQuery = `
-		SELECT * FROM evm.txes
-		WHERE evm.txes.state = 'confirmed'
-		AND CAST(evm.txes.meta->>'SubId' AS NUMERIC) = $1`
+		SELECT * FROM eth_txes
+		WHERE eth_txes.state = 'confirmed'
+		AND CAST(eth_txes.meta->>'SubId' AS NUMERIC) = $1`
 	ConfirmedEthTxesV2PlusBatchQuery = `
-		SELECT * FROM evm.txes
-		WHERE evm.txes.state = 'confirmed'
-		AND CAST(evm.txes.meta->>'GlobalSubId' AS NUMERIC) = $1`
+		SELECT * FROM eth_txes
+		WHERE eth_txes.state = 'confirmed'
+		AND CAST(eth_txes.meta->>'GlobalSubId' AS NUMERIC) = $1`
 )
 
 func newVRFCoordinatorV2Universe(t *testing.T, key ethkey.KeyV2, numConsumers int) coordinatorV2Universe {
@@ -224,7 +224,6 @@ func newVRFCoordinatorV2Universe(t *testing.T, key ethkey.KeyV2, numConsumers in
 	// Deploy old VRF v2 coordinator from bytecode
 	err, oldRootContractAddress, oldRootContract := deployOldCoordinator(
 		t, linkAddress, bhsAddress, linkEthFeed, backend, neil)
-	require.NoError(t, err)
 
 	// Deploy the VRFOwner contract, which will own the VRF coordinator
 	// in some tests.
@@ -478,15 +477,9 @@ func subscribeVRF(
 	consumerContract vrftesthelpers.VRFConsumerContract,
 	coordinator v22.CoordinatorV2_X,
 	backend *backends.SimulatedBackend,
-	fundingAmount *big.Int,
-	nativePayment bool,
+	fundingJuels *big.Int,
 ) (v22.Subscription, *big.Int) {
-	var err error
-	if nativePayment {
-		_, err = consumerContract.CreateSubscriptionAndFundNative(author, fundingAmount)
-	} else {
-		_, err = consumerContract.CreateSubscriptionAndFund(author, fundingAmount)
-	}
+	_, err := consumerContract.CreateSubscriptionAndFund(author, fundingJuels)
 	require.NoError(t, err)
 	backend.Commit()
 
@@ -495,13 +488,6 @@ func subscribeVRF(
 
 	sub, err := coordinator.GetSubscription(nil, subID)
 	require.NoError(t, err)
-
-	if nativePayment {
-		require.Equal(t, fundingAmount.String(), sub.NativeBalance().String())
-	} else {
-		require.Equal(t, fundingAmount.String(), sub.Balance().String())
-	}
-
 	return sub, subID
 }
 
@@ -554,7 +540,6 @@ func createVRFJobs(
 			V2:                       true,
 			GasLanePrice:             gasLanePrices[i],
 			VRFOwnerAddress:          vrfOwnerString,
-			EVMChainID:               testutils.SimulatedChainID.String(),
 		}).Toml()
 
 		jb, err := vrfcommon.ValidatedVRFSpec(spec)
@@ -650,7 +635,6 @@ func requestRandomnessAndAssertRandomWordsRequestedEvent(
 	cbGasLimit uint32,
 	coordinator v22.CoordinatorV2_X,
 	backend *backends.SimulatedBackend,
-	nativePayment bool,
 ) (requestID *big.Int, requestBlockNumber uint64) {
 	minRequestConfirmations := uint16(2)
 	_, err := vrfConsumerHandle.RequestRandomness(
@@ -660,7 +644,7 @@ func requestRandomnessAndAssertRandomWordsRequestedEvent(
 		minRequestConfirmations,
 		cbGasLimit,
 		numWords,
-		nativePayment,
+		false,
 	)
 	require.NoError(t, err)
 	backend.Commit()
@@ -683,7 +667,6 @@ func requestRandomnessAndAssertRandomWordsRequestedEvent(
 	require.Equal(t, cbGasLimit, event.CallbackGasLimit(), "callback gas limit of event and of request not equal")
 	require.Equal(t, minRequestConfirmations, event.MinimumRequestConfirmations(), "min request confirmations of event and of request not equal")
 	require.Equal(t, numWords, event.NumWords(), "num words of event and of request not equal")
-	require.Equal(t, nativePayment, event.NativePayment())
 
 	return requestID, event.Raw().BlockNumber
 }
@@ -696,13 +679,13 @@ func subscribeAndAssertSubscriptionCreatedEvent(
 	vrfConsumerHandle vrftesthelpers.VRFConsumerContract,
 	consumerOwner *bind.TransactOpts,
 	consumerContractAddress common.Address,
-	fundingAmount *big.Int,
+	fundingJuels *big.Int,
 	coordinator v22.CoordinatorV2_X,
 	backend *backends.SimulatedBackend,
-	nativePayment bool,
 ) *big.Int {
 	// Create a subscription and fund with LINK.
-	_, subID := subscribeVRF(t, consumerOwner, vrfConsumerHandle, coordinator, backend, fundingAmount, nativePayment)
+	sub, subID := subscribeVRF(t, consumerOwner, vrfConsumerHandle, coordinator, backend, fundingJuels)
+	require.Equal(t, fundingJuels.String(), sub.Balance().String())
 
 	// Assert the subscription event in the coordinator contract.
 	iter, err := coordinator.FilterSubscriptionCreated(nil, []*big.Int{subID})
@@ -725,7 +708,6 @@ func assertRandomWordsFulfilled(
 	requestID *big.Int,
 	expectedSuccess bool,
 	coordinator v22.CoordinatorV2_X,
-	nativePayment bool,
 ) (rwfe v22.RandomWordsFulfilled) {
 	// Check many times in case there are delays processing the event
 	// this could happen occasionally and cause flaky tests.
@@ -803,7 +785,7 @@ func mineBatch(t *testing.T, requestIDs []*big.Int, subID *big.Int, backend *bac
 		require.NoError(t, err)
 		for _, tx := range txs {
 			var evmTx txmgr.Tx
-			tx.ToTx(&evmTx)
+			txmgr.DbEthTxToEthTx(tx, &evmTx)
 			meta, err := evmTx.GetMeta()
 			require.NoError(t, err)
 			for _, requestID := range meta.RequestIDs {
@@ -871,7 +853,6 @@ func TestVRFV2Integration_SingleConsumer_HappyPath_BatchFulfillment(t *testing.T
 		5,     // number of requests to send
 		false, // don't send big callback
 		vrfcommon.V2,
-		false,
 	)
 }
 
@@ -893,7 +874,6 @@ func TestVRFV2Integration_SingleConsumer_HappyPath_BatchFulfillment_BigGasCallba
 		5,    // number of requests to send
 		true, // send big callback
 		vrfcommon.V2,
-		false,
 	)
 }
 
@@ -913,7 +893,6 @@ func TestVRFV2Integration_SingleConsumer_HappyPath(t *testing.T) {
 		uni.batchCoordinatorContractAddress,
 		ptr(uni.vrfOwnerAddress),
 		vrfcommon.V2,
-		false,
 		func(t *testing.T, coordinator v22.CoordinatorV2_X, rwfe v22.RandomWordsFulfilled, expectedSubID *big.Int) {
 			require.PanicsWithValue(t, "VRF V2 RandomWordsFulfilled does not implement SubID", func() {
 				rwfe.SubID()
@@ -1068,7 +1047,6 @@ func testEoa(
 }
 
 func TestVRFV2Integration_SingleConsumer_EIP150_HappyPath(t *testing.T) {
-	t.Skip("TODO: VRF-617")
 	t.Parallel()
 	ownerKey := cltest.MustGenerateRandomKey(t)
 	uni := newVRFCoordinatorV2Universe(t, ownerKey, 1)
@@ -1079,7 +1057,6 @@ func TestVRFV2Integration_SingleConsumer_EIP150_HappyPath(t *testing.T) {
 		uni.batchCoordinatorContractAddress,
 		false,
 		vrfcommon.V2,
-		false,
 	)
 }
 
@@ -1094,7 +1071,6 @@ func TestVRFV2Integration_SingleConsumer_EIP150_Revert(t *testing.T) {
 		uni.batchCoordinatorContractAddress,
 		false,
 		vrfcommon.V2,
-		false,
 	)
 }
 
@@ -1194,7 +1170,7 @@ func TestVRFV2Integration_SingleConsumer_Wrapper(t *testing.T) {
 	mine(t, requestID, new(big.Int).SetUint64(wrapperSubID), uni.backend, db, vrfcommon.V2)
 
 	// Assert correct state of RandomWordsFulfilled event.
-	assertRandomWordsFulfilled(t, requestID, true, uni.rootContract, false)
+	assertRandomWordsFulfilled(t, requestID, true, uni.rootContract)
 
 	t.Log("Done!")
 }
@@ -1274,7 +1250,7 @@ func TestVRFV2Integration_Wrapper_High_Gas(t *testing.T) {
 	mine(t, requestID, new(big.Int).SetUint64(wrapperSubID), uni.backend, db, vrfcommon.V2)
 
 	// Assert correct state of RandomWordsFulfilled event.
-	assertRandomWordsFulfilled(t, requestID, true, uni.rootContract, false)
+	assertRandomWordsFulfilled(t, requestID, true, uni.rootContract)
 
 	t.Log("Done!")
 }
@@ -1295,47 +1271,6 @@ func TestVRFV2Integration_SingleConsumer_NeedsBlockhashStore(t *testing.T) {
 		uni.batchCoordinatorContractAddress,
 		ptr(uni.vrfOwnerAddress),
 		vrfcommon.V2,
-		false,
-	)
-}
-
-func TestVRFV2Integration_SingleConsumer_NeedsTrustedBlockhashStore(t *testing.T) {
-	t.Parallel()
-	ownerKey := cltest.MustGenerateRandomKey(t)
-	uni := newVRFCoordinatorV2PlusUniverse(t, ownerKey, 2, true)
-	testMultipleConsumersNeedTrustedBHS(
-		t,
-		ownerKey,
-		uni,
-		uni.vrfConsumers,
-		uni.consumerContracts,
-		uni.consumerContractAddresses,
-		uni.rootContract,
-		uni.rootContractAddress,
-		uni.batchCoordinatorContractAddress,
-		vrfcommon.V2Plus,
-		false,
-		false,
-	)
-}
-
-func TestVRFV2Integration_SingleConsumer_NeedsTrustedBlockhashStore_AfterDelay(t *testing.T) {
-	t.Parallel()
-	ownerKey := cltest.MustGenerateRandomKey(t)
-	uni := newVRFCoordinatorV2PlusUniverse(t, ownerKey, 2, true)
-	testMultipleConsumersNeedTrustedBHS(
-		t,
-		ownerKey,
-		uni,
-		uni.vrfConsumers,
-		uni.consumerContracts,
-		uni.consumerContractAddresses,
-		uni.rootContract,
-		uni.rootContractAddress,
-		uni.batchCoordinatorContractAddress,
-		vrfcommon.V2Plus,
-		false,
-		true,
 	)
 }
 
@@ -1355,7 +1290,6 @@ func TestVRFV2Integration_SingleConsumer_BlockHeaderFeeder(t *testing.T) {
 		uni.batchCoordinatorContractAddress,
 		ptr(uni.vrfOwnerAddress),
 		vrfcommon.V2,
-		false,
 	)
 }
 
@@ -1377,7 +1311,6 @@ func TestVRFV2Integration_SingleConsumer_NeedsTopUp(t *testing.T) {
 		assets.Ether(1).ToInt(),   // initial funding of 1 LINK
 		assets.Ether(100).ToInt(), // top up of 100 LINK
 		vrfcommon.V2,
-		false,
 	)
 }
 
@@ -1391,7 +1324,6 @@ func TestVRFV2Integration_SingleConsumer_BigGasCallback_Sandwich(t *testing.T) {
 		uni.batchCoordinatorContractAddress,
 		false,
 		vrfcommon.V2,
-		false,
 	)
 }
 
@@ -1405,7 +1337,6 @@ func TestVRFV2Integration_SingleConsumer_MultipleGasLanes(t *testing.T) {
 		uni.batchCoordinatorContractAddress,
 		false,
 		vrfcommon.V2,
-		false,
 	)
 }
 
@@ -1419,7 +1350,6 @@ func TestVRFV2Integration_SingleConsumer_AlwaysRevertingCallback_StillFulfilled(
 		uni.batchCoordinatorContractAddress,
 		false,
 		vrfcommon.V2,
-		false,
 	)
 }
 
@@ -1433,7 +1363,6 @@ func TestVRFV2Integration_ConsumerProxy_HappyPath(t *testing.T) {
 		uni.batchCoordinatorContractAddress,
 		false,
 		vrfcommon.V2,
-		false,
 	)
 }
 
@@ -1754,7 +1683,7 @@ func TestIntegrationVRFV2(t *testing.T) {
 	})
 
 	// We should see the response count present
-	chain, err := app.GetRelayers().LegacyEVMChains().Get(big.NewInt(1337).String())
+	chain, err := app.Chains.EVM.Get(big.NewInt(1337))
 	require.NoError(t, err)
 
 	q := pg.NewQ(app.GetSqlxDB(), app.Logger, app.Config.Database())
@@ -1997,7 +1926,7 @@ func TestFulfillmentCost(t *testing.T) {
 
 func TestStartingCountsV1(t *testing.T) {
 	cfg, db := heavyweight.FullTestDBNoFixturesV2(t, "vrf_test_starting_counts", nil)
-	_, err := db.Exec(`INSERT INTO evm.heads (hash, number, parent_hash, created_at, timestamp, evm_chain_id)
+	_, err := db.Exec(`INSERT INTO evm_heads (hash, number, parent_hash, created_at, timestamp, evm_chain_id)
 	VALUES ($1, 4, $2, NOW(), NOW(), 1337)`, utils.NewHash(), utils.NewHash())
 	require.NoError(t, err)
 
@@ -2101,18 +2030,19 @@ func TestStartingCountsV1(t *testing.T) {
 			ChainID:            chainID.ToInt(),
 		})
 	}
-	sql := `INSERT INTO evm.txes (nonce, from_address, to_address, encoded_payload, value, gas_limit, state, created_at, broadcast_at, initial_broadcast_at, meta, subject, evm_chain_id, min_confirmations, pipeline_task_run_id)
+	txes := append(confirmedTxes, unconfirmedTxes...)
+	sql := `INSERT INTO eth_txes (nonce, from_address, to_address, encoded_payload, value, gas_limit, state, created_at, broadcast_at, initial_broadcast_at, meta, subject, evm_chain_id, min_confirmations, pipeline_task_run_id)
 VALUES (:nonce, :from_address, :to_address, :encoded_payload, :value, :gas_limit, :state, :created_at, :broadcast_at, :initial_broadcast_at, :meta, :subject, :evm_chain_id, :min_confirmations, :pipeline_task_run_id);`
-	for _, tx := range append(confirmedTxes, unconfirmedTxes...) {
-		var dbEtx txmgr.DbEthTx
-		dbEtx.FromTx(&tx) //nolint:gosec // just copying fields
+	for _, tx := range txes {
+		dbEtx := txmgr.DbEthTxFromEthTx(&tx)
 		_, err = db.NamedExec(sql, &dbEtx)
+		txmgr.DbEthTxToEthTx(dbEtx, &tx)
 		require.NoError(t, err)
 	}
 
-	// add evm.tx_attempts for confirmed
+	// add eth_tx_attempts for confirmed
 	broadcastBlock := int64(1)
-	var txAttempts []txmgr.TxAttempt
+	txAttempts := []txmgr.TxAttempt{}
 	for i := range confirmedTxes {
 		txAttempts = append(txAttempts, txmgr.TxAttempt{
 			TxID:                    int64(i + 1),
@@ -2125,7 +2055,7 @@ VALUES (:nonce, :from_address, :to_address, :encoded_payload, :value, :gas_limit
 			ChainSpecificFeeLimit:   uint32(100),
 		})
 	}
-	// add evm.tx_attempts for unconfirmed
+	// add eth_tx_attempts for unconfirmed
 	for i := range unconfirmedTxes {
 		txAttempts = append(txAttempts, txmgr.TxAttempt{
 			TxID:                  int64(i + 1 + len(confirmedTxes)),
@@ -2140,16 +2070,16 @@ VALUES (:nonce, :from_address, :to_address, :encoded_payload, :value, :gas_limit
 	for _, txAttempt := range txAttempts {
 		t.Log("tx attempt eth tx id: ", txAttempt.TxID)
 	}
-	sql = `INSERT INTO evm.tx_attempts (eth_tx_id, gas_price, signed_raw_tx, hash, state, created_at, chain_specific_gas_limit)
+	sql = `INSERT INTO eth_tx_attempts (eth_tx_id, gas_price, signed_raw_tx, hash, state, created_at, chain_specific_gas_limit)
 		VALUES (:eth_tx_id, :gas_price, :signed_raw_tx, :hash, :state, :created_at, :chain_specific_gas_limit)`
 	for _, attempt := range txAttempts {
-		var dbAttempt txmgr.DbEthTxAttempt
-		dbAttempt.FromTxAttempt(&attempt) //nolint:gosec // just copying fields
+		dbAttempt := txmgr.DbEthTxAttemptFromEthTxAttempt(&attempt)
 		_, err = db.NamedExec(sql, &dbAttempt)
+		txmgr.DbEthTxAttemptToEthTxAttempt(dbAttempt, &attempt)
 		require.NoError(t, err)
 	}
 
-	// add evm.receipts
+	// add eth_receipts
 	receipts := []txmgr.Receipt{}
 	for i := 0; i < 4; i++ {
 		receipts = append(receipts, txmgr.Receipt{
@@ -2161,10 +2091,10 @@ VALUES (:nonce, :from_address, :to_address, :encoded_payload, :value, :gas_limit
 			CreatedAt:        time.Now(),
 		})
 	}
-	sql = `INSERT INTO evm.receipts (block_hash, tx_hash, block_number, transaction_index, receipt, created_at)
+	sql = `INSERT INTO eth_receipts (block_hash, tx_hash, block_number, transaction_index, receipt, created_at)
 		VALUES (:block_hash, :tx_hash, :block_number, :transaction_index, :receipt, :created_at)`
 	for _, r := range receipts {
-		_, err := db.NamedExec(sql, r)
+		_, err := db.NamedExec(sql, &r)
 		require.NoError(t, err)
 	}
 
@@ -2198,22 +2128,12 @@ func FindLatestRandomnessRequestedLog(t *testing.T,
 	return rf[latest]
 }
 
-func AssertLinkBalance(t *testing.T, linkContract *link_token_interface.LinkToken, address common.Address, balance *big.Int) {
-	b, err := linkContract.BalanceOf(nil, address)
-	require.NoError(t, err)
-	assert.Equal(t, balance.String(), b.String(), "invalid balance for %v", address)
-}
-
-func AssertNativeBalance(t *testing.T, backend *backends.SimulatedBackend, address common.Address, balance *big.Int) {
-	b, err := backend.BalanceAt(testutils.Context(t), address, nil)
-	require.NoError(t, err)
-	assert.Equal(t, balance.String(), b.String(), "invalid balance for %v", address)
-}
-
 func AssertLinkBalances(t *testing.T, linkContract *link_token_interface.LinkToken, addresses []common.Address, balances []*big.Int) {
 	require.Equal(t, len(addresses), len(balances))
 	for i, a := range addresses {
-		AssertLinkBalance(t, linkContract, a, balances[i])
+		b, err := linkContract.BalanceOf(nil, a)
+		require.NoError(t, err)
+		assert.Equal(t, balances[i].String(), b.String(), "invalid balance for %v", a)
 	}
 }
 

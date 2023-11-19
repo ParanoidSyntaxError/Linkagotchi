@@ -2,48 +2,47 @@ package evm
 
 import (
 	"context"
-	"fmt"
+	"math/big"
 
-	ocr2keepers "github.com/smartcontractkit/ocr2keepers/pkg/v3/types"
-
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/logpoller"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ocr2keeper/evm21/core"
+	ocr2keepers "github.com/smartcontractkit/ocr2keepers/pkg"
+	keepersflows "github.com/smartcontractkit/ocr2keepers/pkg/v3/flows"
 )
 
-var _ ocr2keepers.ConditionalUpkeepProvider = &upkeepProvider{}
+var _ keepersflows.UpkeepProvider = &upkeepProvider{}
 
 type upkeepProvider struct {
-	activeUpkeeps ActiveUpkeepList
-	bs            *BlockSubscriber
-	lp            logpoller.LogPoller
+	reg *EvmRegistry
 }
 
-func NewUpkeepProvider(activeUpkeeps ActiveUpkeepList, bs *BlockSubscriber, lp logpoller.LogPoller) *upkeepProvider {
+func NewUpkeepProvider(reg *EvmRegistry) *upkeepProvider {
 	return &upkeepProvider{
-		activeUpkeeps: activeUpkeeps,
-		bs:            bs,
-		lp:            lp,
+		reg: reg,
 	}
 }
 
-func (p *upkeepProvider) GetActiveUpkeeps(_ context.Context) ([]ocr2keepers.UpkeepPayload, error) {
-	latestBlock := p.bs.latestBlock.Load()
-	if latestBlock == nil {
-		return nil, fmt.Errorf("no latest block found when fetching active upkeeps")
+func (p *upkeepProvider) GetActiveUpkeeps(ctx context.Context, blockKey ocr2keepers.BlockKey) ([]ocr2keepers.UpkeepPayload, error) {
+	ids, err := p.reg.GetActiveUpkeepIDsByType(ctx, uint8(conditionTrigger))
+	if err != nil {
+		return nil, err
 	}
-	var payloads []ocr2keepers.UpkeepPayload
-	for _, uid := range p.activeUpkeeps.View(ocr2keepers.ConditionTrigger) {
-		payload, err := core.NewUpkeepPayload(
-			uid,
-			ocr2keepers.NewTrigger(latestBlock.Number, latestBlock.Hash),
-			nil,
-		)
-		if err != nil {
-			// skip invalid payloads
-			continue
-		}
+	block, ok := big.NewInt(0).SetString(string(blockKey), 10)
+	if !ok {
+		return nil, ocr2keepers.ErrInvalidBlockKey
+	}
+	blockHash, err := p.reg.getBlockHash(block)
+	if err != nil {
+		return nil, err
+	}
 
-		payloads = append(payloads, payload)
+	var payloads []ocr2keepers.UpkeepPayload
+	for _, uid := range ids {
+		payloads = append(payloads, ocr2keepers.NewUpkeepPayload(
+			big.NewInt(0).SetBytes(uid),
+			int(conditionTrigger),
+			blockKey,
+			ocr2keepers.NewTrigger(block.Int64(), blockHash.Hex(), struct{}{}),
+			nil,
+		))
 	}
 
 	return payloads, nil

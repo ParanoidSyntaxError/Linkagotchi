@@ -2,7 +2,7 @@ pragma solidity ^0.8.0;
 
 import "../onRamp/EVM2EVMOnRampSetup.t.sol";
 import "../../applications/CCIPClientExample.sol";
-import {ERC165Checker} from "../../../vendor/openzeppelin-solidity/v4.8.0/contracts/utils/introspection/ERC165Checker.sol";
+import {ERC165Checker} from "../../../vendor/openzeppelin-solidity/v4.8.0/utils/introspection/ERC165Checker.sol";
 
 contract CCIPClientExample_sanity is EVM2EVMOnRampSetup {
   function testExamples() public {
@@ -14,7 +14,7 @@ contract CCIPClientExample_sanity is EVM2EVMOnRampSetup {
     assertEq(IERC20(s_sourceFeeToken).allowance(address(exampleContract), address(s_sourceRouter)), 2 ** 256 - 1);
 
     // Can set chain
-    Client.EVMExtraArgsV1 memory extraArgs = Client.EVMExtraArgsV1({gasLimit: 300_000});
+    Client.EVMExtraArgsV1 memory extraArgs = Client.EVMExtraArgsV1({gasLimit: 300_000, strict: false});
     bytes memory encodedExtraArgs = Client._argsToBytes(extraArgs);
     exampleContract.enableChain(DEST_CHAIN_ID, encodedExtraArgs);
     assertEq(exampleContract.s_chains(DEST_CHAIN_ID), encodedExtraArgs);
@@ -28,10 +28,7 @@ contract CCIPClientExample_sanity is EVM2EVMOnRampSetup {
     exampleContract.sendDataPayFeeToken(DEST_CHAIN_ID, abi.encode(toAddress), bytes("hello"));
 
     // Can send data tokens
-    assertEq(
-      address(s_onRamp.getPoolBySourceToken(DEST_CHAIN_ID, IERC20(s_sourceTokens[1]))),
-      address(s_sourcePools[1])
-    );
+    assertEq(address(s_onRamp.getPoolBySourceToken(IERC20(s_sourceTokens[1]))), address(s_sourcePools[1]));
     deal(s_sourceTokens[1], OWNER, 100 ether);
     IERC20(s_sourceTokens[1]).approve(address(exampleContract), 1 ether);
     Client.EVMTokenAmount[] memory tokenAmounts = new Client.EVMTokenAmount[](1);

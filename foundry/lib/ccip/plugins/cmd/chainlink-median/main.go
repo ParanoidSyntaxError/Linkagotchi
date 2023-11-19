@@ -14,13 +14,13 @@ const (
 )
 
 func main() {
-	s := plugins.MustNewStartedServer(loggerName)
+	s := plugins.StartServer(loggerName)
 	defer s.Stop()
 
 	p := median.NewPlugin(s.Logger)
 	defer s.Logger.ErrorIfFn(p.Close, "Failed to close")
 
-	s.MustRegister(p)
+	s.MustRegister(p.Name(), p)
 
 	stop := make(chan struct{})
 	defer close(stop)

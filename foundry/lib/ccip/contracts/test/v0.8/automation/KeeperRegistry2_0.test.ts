@@ -252,9 +252,7 @@ const parseCancelledUpkeepReportLogs = (receipt: any) => {
 before(async () => {
   personas = (await getUsers()).personas
 
-  linkTokenFactory = await ethers.getContractFactory(
-    'src/v0.4/LinkToken.sol:LinkToken',
-  )
+  linkTokenFactory = await ethers.getContractFactory('LinkToken')
   // need full path because there are two contracts with name MockV3Aggregator
   mockV3AggregatorFactory = (await ethers.getContractFactory(
     'src/v0.8/tests/MockV3Aggregator.sol:MockV3Aggregator',
@@ -1065,7 +1063,7 @@ describe.skip('KeeperRegistry2_0', () => {
           linkForGas(
             gasUsed,
             gasOverhead,
-            gasCeilingMultiplier, // Should be same with existing multiplier
+            gasCeilingMultiplier, // Should be same with exisitng multiplier
             paymentPremiumPPB,
             flatFeeMicroLink,
           ).total.toString(),
@@ -4340,7 +4338,7 @@ describe.skip('KeeperRegistry2_0', () => {
       )
     })
 
-    it('sets the payees when existing payees are zero address', async () => {
+    it('sets the payees when exisitng payees are zero address', async () => {
       //Initial payees should be zero address
       for (let i = 0; i < keeperAddresses.length; i++) {
         const payee = (await registry.getTransmitterInfo(keeperAddresses[i]))

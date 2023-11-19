@@ -42,7 +42,6 @@ contract ARMProxyStandaloneTest is Test {
     s_armProxy.setARM(address(0x0));
   }
 
-  /*
   function testARMCall_fuzz(bool expectedSuccess, bytes memory call, bytes memory ret) public {
     // filter out calls to functions that will be handled on the ARMProxy instead
     // of the underlying ARM contract
@@ -67,7 +66,6 @@ contract ARMProxyStandaloneTest is Test {
     assertEq(result, ret);
     assertEq(expectedSuccess, actualSuccess);
   }
-  */
 
   function testARMCallEmptyContractRevert() public {
     vm.prank(OWNER_ADDRESS);

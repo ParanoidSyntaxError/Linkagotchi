@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +18,7 @@ import (
 	"github.com/onsi/gomega"
 	"github.com/pkg/errors"
 
+	ctfClient "github.com/smartcontractkit/chainlink/integration-tests/client"
 	"github.com/smartcontractkit/libocr/commontypes"
 	"github.com/smartcontractkit/libocr/offchainreporting2/confighelper"
 	types4 "github.com/smartcontractkit/libocr/offchainreporting2plus/types"
@@ -26,17 +26,14 @@ import (
 	"go.uber.org/zap"
 	"k8s.io/utils/pointer"
 
-	"github.com/smartcontractkit/chainlink-relay/pkg/loop"
-	ctfClient "github.com/smartcontractkit/chainlink/integration-tests/client"
-
 	"github.com/smartcontractkit/chainlink/v2/core/chains/evm"
 	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/client"
 	v2 "github.com/smartcontractkit/chainlink/v2/core/chains/evm/config/toml"
 	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/logpoller"
 	configv2 "github.com/smartcontractkit/chainlink/v2/core/config/toml"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/ccip/generated/commit_store"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/ccip/generated/evm_2_evm_offramp"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/ccip/generated/evm_2_evm_onramp"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/commit_store"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/evm_2_evm_offramp"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/evm_2_evm_onramp"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest/heavyweight"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
@@ -47,7 +44,7 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/chaintype"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/ocr2key"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/abihelpers"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/internal/ccipdata"
+	ccipconfig "github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/config"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/testhelpers"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/validate"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocrbootstrap"
@@ -55,7 +52,6 @@ import (
 	evmrelay "github.com/smartcontractkit/chainlink/v2/core/services/relay/evm"
 	"github.com/smartcontractkit/chainlink/v2/core/store/models"
 	"github.com/smartcontractkit/chainlink/v2/core/utils"
-	"github.com/smartcontractkit/chainlink/v2/plugins"
 )
 
 type Node struct {
@@ -77,14 +73,14 @@ func (node *Node) FindJobIDForContract(t *testing.T, addr common.Address) int32 
 }
 
 func (node *Node) EventuallyNodeUsesUpdatedPriceRegistry(t *testing.T, ccipContracts CCIPIntegrationTestHarness) logpoller.Log {
-	c, err := node.App.GetRelayers().LegacyEVMChains().Get(strconv.FormatUint(ccipContracts.Dest.ChainID, 10))
+	c, err := node.App.GetChains().EVM.Get(big.NewInt(0).SetUint64(ccipContracts.Dest.ChainID))
 	require.NoError(t, err)
 	var log logpoller.Log
 	gomega.NewGomegaWithT(t).Eventually(func() bool {
 		ccipContracts.Source.Chain.Commit()
 		ccipContracts.Dest.Chain.Commit()
 		log, err := c.LogPoller().LatestLogByEventSigWithConfs(
-			ccipdata.UsdPerUnitGasUpdatedV1_0_0,
+			abihelpers.EventSignatures.UsdPerUnitGasUpdated,
 			ccipContracts.Dest.PriceRegistry.Address(),
 			0,
 			pg.WithParentCtx(testutils.Context(t)),
@@ -98,8 +94,8 @@ func (node *Node) EventuallyNodeUsesUpdatedPriceRegistry(t *testing.T, ccipContr
 	return log
 }
 
-func (node *Node) EventuallyNodeUsesNewCommitConfig(t *testing.T, ccipContracts CCIPIntegrationTestHarness, commitCfg ccipdata.CommitOnchainConfig) logpoller.Log {
-	c, err := node.App.GetRelayers().LegacyEVMChains().Get(strconv.FormatUint(ccipContracts.Dest.ChainID, 10))
+func (node *Node) EventuallyNodeUsesNewCommitConfig(t *testing.T, ccipContracts CCIPIntegrationTestHarness, commitCfg ccipconfig.CommitOnchainConfig) logpoller.Log {
+	c, err := node.App.GetChains().EVM.Get(big.NewInt(0).SetUint64(ccipContracts.Dest.ChainID))
 	require.NoError(t, err)
 	var log logpoller.Log
 	gomega.NewGomegaWithT(t).Eventually(func() bool {
@@ -112,7 +108,7 @@ func (node *Node) EventuallyNodeUsesNewCommitConfig(t *testing.T, ccipContracts 
 			pg.WithParentCtx(testutils.Context(t)),
 		)
 		require.NoError(t, err)
-		var latestCfg ccipdata.CommitOnchainConfig
+		var latestCfg ccipconfig.CommitOnchainConfig
 		if log != nil {
 			latestCfg, err = DecodeCommitOnChainConfig(log.Data)
 			require.NoError(t, err)
@@ -123,8 +119,8 @@ func (node *Node) EventuallyNodeUsesNewCommitConfig(t *testing.T, ccipContracts 
 	return log
 }
 
-func (node *Node) EventuallyNodeUsesNewExecConfig(t *testing.T, ccipContracts CCIPIntegrationTestHarness, execCfg ccipdata.ExecOnchainConfigV1_2_0) logpoller.Log {
-	c, err := node.App.GetRelayers().LegacyEVMChains().Get(strconv.FormatUint(ccipContracts.Dest.ChainID, 10))
+func (node *Node) EventuallyNodeUsesNewExecConfig(t *testing.T, ccipContracts CCIPIntegrationTestHarness, execCfg ccipconfig.ExecOnchainConfig) logpoller.Log {
+	c, err := node.App.GetChains().EVM.Get(big.NewInt(0).SetUint64(ccipContracts.Dest.ChainID))
 	require.NoError(t, err)
 	var log logpoller.Log
 	gomega.NewGomegaWithT(t).Eventually(func() bool {
@@ -137,7 +133,7 @@ func (node *Node) EventuallyNodeUsesNewExecConfig(t *testing.T, ccipContracts CC
 			pg.WithParentCtx(testutils.Context(t)),
 		)
 		require.NoError(t, err)
-		var latestCfg ccipdata.ExecOnchainConfigV1_2_0
+		var latestCfg ccipconfig.ExecOnchainConfig
 		if log != nil {
 			latestCfg, err = DecodeExecOnChainConfig(log.Data)
 			require.NoError(t, err)
@@ -149,16 +145,16 @@ func (node *Node) EventuallyNodeUsesNewExecConfig(t *testing.T, ccipContracts CC
 }
 
 func (node *Node) EventuallyHasReqSeqNum(t *testing.T, ccipContracts *CCIPIntegrationTestHarness, onRamp common.Address, seqNum int) logpoller.Log {
-	c, err := node.App.GetRelayers().LegacyEVMChains().Get(strconv.FormatUint(ccipContracts.Source.ChainID, 10))
+	c, err := node.App.GetChains().EVM.Get(big.NewInt(0).SetUint64(ccipContracts.Source.ChainID))
 	require.NoError(t, err)
 	var log logpoller.Log
 	gomega.NewGomegaWithT(t).Eventually(func() bool {
 		ccipContracts.Source.Chain.Commit()
 		ccipContracts.Dest.Chain.Commit()
 		lgs, err := c.LogPoller().LogsDataWordRange(
-			ccipdata.CCIPSendRequestEventSigV1_2_0,
+			abihelpers.EventSignatures.SendRequested,
 			onRamp,
-			ccipdata.CCIPSendRequestSeqNumIndexV1_2_0,
+			abihelpers.EventSignatures.SendRequestedSequenceNumberWord,
 			abihelpers.EvmWord(uint64(seqNum)),
 			abihelpers.EvmWord(uint64(seqNum)),
 			1,
@@ -176,16 +172,16 @@ func (node *Node) EventuallyHasReqSeqNum(t *testing.T, ccipContracts *CCIPIntegr
 }
 
 func (node *Node) EventuallyHasExecutedSeqNums(t *testing.T, ccipContracts *CCIPIntegrationTestHarness, offRamp common.Address, minSeqNum int, maxSeqNum int) []logpoller.Log {
-	c, err := node.App.GetRelayers().LegacyEVMChains().Get(strconv.FormatUint(ccipContracts.Dest.ChainID, 10))
+	c, err := node.App.GetChains().EVM.Get(big.NewInt(0).SetUint64(ccipContracts.Dest.ChainID))
 	require.NoError(t, err)
 	var logs []logpoller.Log
 	gomega.NewGomegaWithT(t).Eventually(func() bool {
 		ccipContracts.Source.Chain.Commit()
 		ccipContracts.Dest.Chain.Commit()
 		lgs, err := c.LogPoller().IndexedLogsTopicRange(
-			ccipdata.ExecutionStateChangedEventV1_0_0,
+			abihelpers.EventSignatures.ExecutionStateChanged,
 			offRamp,
-			ccipdata.ExecutionStateChangedSeqNrIndexV1_0_0,
+			abihelpers.EventSignatures.ExecutionStateChangedSequenceNumberIndex,
 			abihelpers.EvmWord(uint64(minSeqNum)),
 			abihelpers.EvmWord(uint64(maxSeqNum)),
 			1,
@@ -204,16 +200,16 @@ func (node *Node) EventuallyHasExecutedSeqNums(t *testing.T, ccipContracts *CCIP
 }
 
 func (node *Node) ConsistentlySeqNumHasNotBeenExecuted(t *testing.T, ccipContracts *CCIPIntegrationTestHarness, offRamp common.Address, seqNum int) logpoller.Log {
-	c, err := node.App.GetRelayers().LegacyEVMChains().Get(strconv.FormatUint(ccipContracts.Dest.ChainID, 10))
+	c, err := node.App.GetChains().EVM.Get(big.NewInt(0).SetUint64(ccipContracts.Dest.ChainID))
 	require.NoError(t, err)
 	var log logpoller.Log
 	gomega.NewGomegaWithT(t).Consistently(func() bool {
 		ccipContracts.Source.Chain.Commit()
 		ccipContracts.Dest.Chain.Commit()
 		lgs, err := c.LogPoller().IndexedLogsTopicRange(
-			ccipdata.ExecutionStateChangedEventV1_0_0,
+			abihelpers.EventSignatures.ExecutionStateChanged,
 			offRamp,
-			ccipdata.ExecutionStateChangedSeqNrIndexV1_0_0,
+			abihelpers.EventSignatures.ExecutionStateChangedSequenceNumberIndex,
 			abihelpers.EvmWord(uint64(seqNum)),
 			abihelpers.EvmWord(uint64(seqNum)),
 			1,
@@ -275,12 +271,10 @@ func setupNodeCCIP(
 		}
 		c.Log.Level = &loglevel
 		c.Feature.CCIP = &trueRef
-		c.Feature.UICSAKeys = &trueRef
 		c.OCR.Enabled = &falseRef
 		c.OCR.DefaultTransactionQueueDepth = pointer.Uint32(200)
 		c.OCR2.Enabled = &trueRef
 		c.Feature.LogPoller = &trueRef
-		c.P2P.V1.Enabled = &falseRef
 		c.P2P.V2.Enabled = &trueRef
 		c.P2P.V2.DeltaDial = models.MustNewDuration(500 * time.Millisecond)
 		c.P2P.V2.DeltaReconcile = models.MustNewDuration(5 * time.Second)
@@ -314,58 +308,47 @@ func setupNodeCCIP(
 	sourceClient := client.NewSimulatedBackendClient(t, sourceChain, sourceChainID)
 	destClient := client.NewSimulatedBackendClient(t, destChain, destChainID)
 	keyStore := keystore.New(db, utils.FastScryptParams, lggr, config.Database())
-	simEthKeyStore := testhelpers.EthKeyStoreSim{
-		ETHKS: keyStore.Eth(),
-		CSAKS: keyStore.CSA(),
-	}
+	simEthKeyStore := testhelpers.EthKeyStoreSim{Eth: keyStore.Eth()}
 	mailMon := utils.NewMailboxMonitor("CCIP")
-	evmOpts := chainlink.EVMFactoryConfig{
-		ChainOpts: evm.ChainOpts{
-			AppConfig:        config,
-			EventBroadcaster: eventBroadcaster,
-			GenEthClient: func(chainID *big.Int) client.Client {
-				if chainID.String() == sourceChainID.String() {
-					return sourceClient
-				} else if chainID.String() == destChainID.String() {
-					return destClient
-				}
-				t.Fatalf("invalid chain ID %v", chainID.String())
-				return nil
-			},
-			MailMon: mailMon,
-			DB:      db,
-		},
-		CSAETHKeystore: simEthKeyStore,
-	}
-	loopRegistry := plugins.NewLoopRegistry(lggr.Named("LoopRegistry"))
-	relayerFactory := chainlink.RelayerFactory{
-		Logger:       lggr,
-		LoopRegistry: loopRegistry,
-		GRPCOpts:     loop.GRPCOpts{},
-	}
-	testCtx := testutils.Context(t)
-	// evm alway enabled for backward compatibility
-	initOps := []chainlink.CoreRelayerChainInitFunc{chainlink.InitEVM(testCtx, relayerFactory, evmOpts)}
 
-	relayChainInterops, err := chainlink.NewCoreRelayerChainInteroperators(initOps...)
+	evmChain, err := evm.NewTOMLChainSet(context.Background(), evm.ChainSetOpts{
+		Config:           config,
+		Logger:           lggr,
+		DB:               db,
+		KeyStore:         simEthKeyStore,
+		EventBroadcaster: eventBroadcaster,
+		GenEthClient: func(chainID *big.Int) client.Client {
+			if chainID.String() == sourceChainID.String() {
+				return sourceClient
+			} else if chainID.String() == destChainID.String() {
+				return destClient
+			}
+			t.Fatalf("invalid chain ID %v", chainID.String())
+			return nil
+		},
+		MailMon: mailMon,
+	})
 	if err != nil {
-		t.Fatal(err)
+		lggr.Fatal(err)
 	}
 
 	app, err := chainlink.NewApplication(chainlink.ApplicationOpts{
-		Config:                     config,
-		EventBroadcaster:           eventBroadcaster,
-		SqlxDB:                     db,
-		KeyStore:                   keyStore,
-		RelayerChainInteroperators: relayChainInterops,
-		Logger:                     lggr,
-		ExternalInitiatorManager:   nil,
-		CloseLogger:                lggr.Sync,
-		UnrestrictedHTTPClient:     &http.Client{},
-		RestrictedHTTPClient:       &http.Client{},
-		AuditLogger:                audit.NoopLogger,
-		MailMon:                    mailMon,
-		LoopRegistry:               plugins.NewLoopRegistry(lggr),
+		Config:           config,
+		EventBroadcaster: eventBroadcaster,
+		SqlxDB:           db,
+		KeyStore:         keyStore,
+		Chains: chainlink.Chains{
+			EVM: evmChain,
+		},
+		Logger:                   lggr,
+		ExternalInitiatorManager: nil,
+		CloseLogger: func() error {
+			return nil
+		},
+		UnrestrictedHTTPClient: &http.Client{},
+		RestrictedHTTPClient:   &http.Client{},
+		AuditLogger:            audit.NoopLogger,
+		MailMon:                mailMon,
 	})
 	require.NoError(t, err)
 	require.NoError(t, app.GetKeyStore().Unlock("password"))
@@ -430,8 +413,8 @@ type CCIPIntegrationTestHarness struct {
 	Bootstrap Node
 }
 
-func SetupCCIPIntegrationTH(t *testing.T, sourceChainID, sourceChainSelector, destChainId, destChainSelector uint64) CCIPIntegrationTestHarness {
-	c := testhelpers.SetupCCIPContracts(t, sourceChainID, sourceChainSelector, destChainId, destChainSelector)
+func SetupCCIPIntegrationTH(t *testing.T, sourceChainID, destChainID uint64) CCIPIntegrationTestHarness {
+	c := testhelpers.SetupCCIPContracts(t, sourceChainID, destChainID)
 	return CCIPIntegrationTestHarness{
 		CCIPContracts: c,
 	}
@@ -540,7 +523,7 @@ func (c *CCIPIntegrationTestHarness) EventuallyExecutionStateChangedToSuccess(t 
 		it, err := offRamp.FilterExecutionStateChanged(&bind.FilterOpts{Start: blockNum}, seqNum, [][32]byte{})
 		require.NoError(t, err)
 		for it.Next() {
-			if ccipdata.MessageExecutionState(it.Event.State) == ccipdata.ExecutionStateSuccess {
+			if abihelpers.MessageExecutionState(it.Event.State) == abihelpers.ExecutionStateSuccess {
 				t.Logf("ExecutionStateChanged event found for seqNum %d", it.Event.SequenceNumber)
 				return true
 			}
@@ -699,35 +682,35 @@ func (c *CCIPIntegrationTestHarness) SetUpNodesAndJobs(t *testing.T, pricePipeli
 	c.AddAllJobs(t, jobParams)
 
 	// Replay for bootstrap.
-	bc, err := bootstrapNode.App.GetRelayers().LegacyEVMChains().Get(strconv.FormatUint(c.Dest.ChainID, 10))
+	bc, err := bootstrapNode.App.GetChains().EVM.Get(big.NewInt(0).SetUint64(c.Dest.ChainID))
 	require.NoError(t, err)
 	require.NoError(t, bc.LogPoller().Replay(context.Background(), configBlock))
 	c.Dest.Chain.Commit()
 
 	return jobParams
 }
-func DecodeCommitOnChainConfig(encoded []byte) (ccipdata.CommitOnchainConfig, error) {
-	var onchainConfig ccipdata.CommitOnchainConfig
+func DecodeCommitOnChainConfig(encoded []byte) (ccipconfig.CommitOnchainConfig, error) {
+	var onchainConfig ccipconfig.CommitOnchainConfig
 	unpacked, err := abihelpers.DecodeOCR2Config(encoded)
 	if err != nil {
 		return onchainConfig, err
 	}
 	onChainCfg := unpacked.OnchainConfig
-	onchainConfig, err = abihelpers.DecodeAbiStruct[ccipdata.CommitOnchainConfig](onChainCfg)
+	onchainConfig, err = abihelpers.DecodeAbiStruct[ccipconfig.CommitOnchainConfig](onChainCfg)
 	if err != nil {
 		return onchainConfig, err
 	}
 	return onchainConfig, nil
 }
 
-func DecodeExecOnChainConfig(encoded []byte) (ccipdata.ExecOnchainConfigV1_2_0, error) {
-	var onchainConfig ccipdata.ExecOnchainConfigV1_2_0
+func DecodeExecOnChainConfig(encoded []byte) (ccipconfig.ExecOnchainConfig, error) {
+	var onchainConfig ccipconfig.ExecOnchainConfig
 	unpacked, err := abihelpers.DecodeOCR2Config(encoded)
 	if err != nil {
 		return onchainConfig, errors.Wrap(err, "failed to unpack log data")
 	}
 	onChainCfg := unpacked.OnchainConfig
-	onchainConfig, err = abihelpers.DecodeAbiStruct[ccipdata.ExecOnchainConfigV1_2_0](onChainCfg)
+	onchainConfig, err = abihelpers.DecodeAbiStruct[ccipconfig.ExecOnchainConfig](onChainCfg)
 	if err != nil {
 		return onchainConfig, err
 	}

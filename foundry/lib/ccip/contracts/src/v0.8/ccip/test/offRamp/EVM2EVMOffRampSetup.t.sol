@@ -3,6 +3,7 @@ pragma solidity 0.8.19;
 
 import {ICommitStore} from "../../interfaces/ICommitStore.sol";
 import {IAny2EVMMessageReceiver} from "../../interfaces/IAny2EVMMessageReceiver.sol";
+import {IPriceRegistry} from "../../interfaces/IPriceRegistry.sol";
 import {IPool} from "../../interfaces/pools/IPool.sol";
 
 import {Internal} from "../../libraries/Internal.sol";
@@ -11,6 +12,7 @@ import {PriceRegistrySetup} from "../priceRegistry/PriceRegistry.t.sol";
 import {MockCommitStore} from "../mocks/MockCommitStore.sol";
 import {Router} from "../../Router.sol";
 import {EVM2EVMOffRamp} from "../../offRamp/EVM2EVMOffRamp.sol";
+import {AggregateRateLimiter} from "../../AggregateRateLimiter.sol";
 import {EVM2EVMOffRampHelper} from "../helpers/EVM2EVMOffRampHelper.sol";
 import {TokenSetup} from "../TokenSetup.t.sol";
 import {RouterSetup} from "../router/RouterSetup.t.sol";
@@ -19,7 +21,7 @@ import {LockReleaseTokenPool} from "../../pools/LockReleaseTokenPool.sol";
 import {TokenPool} from "../../pools/TokenPool.sol";
 import {OCR2BaseSetup} from "../ocr/OCR2Base.t.sol";
 
-import {IERC20} from "../../../vendor/openzeppelin-solidity/v4.8.0/contracts/token/ERC20/IERC20.sol";
+import {IERC20} from "../../../vendor/openzeppelin-solidity/v4.8.0/token/ERC20/IERC20.sol";
 
 contract EVM2EVMOffRampSetup is TokenSetup, PriceRegistrySetup, OCR2BaseSetup {
   MockCommitStore internal s_mockCommitStore;
@@ -144,7 +146,6 @@ contract EVM2EVMOffRampSetup is TokenSetup, PriceRegistrySetup, OCR2BaseSetup {
       receiver: address(s_receiver),
       data: data,
       tokenAmounts: tokenAmounts,
-      sourceTokenData: new bytes[](tokenAmounts.length),
       feeToken: s_destFeeToken,
       feeTokenAmount: uint256(0),
       messageId: ""
@@ -203,11 +204,10 @@ contract EVM2EVMOffRampSetup is TokenSetup, PriceRegistrySetup, OCR2BaseSetup {
   }
 
   function _assertSameConfig(EVM2EVMOffRamp.DynamicConfig memory a, EVM2EVMOffRamp.DynamicConfig memory b) public {
+    assertEq(a.maxDataSize, b.maxDataSize);
+    assertEq(a.maxTokensLength, b.maxTokensLength);
     assertEq(a.permissionLessExecutionThresholdSeconds, b.permissionLessExecutionThresholdSeconds);
     assertEq(a.router, b.router);
     assertEq(a.priceRegistry, b.priceRegistry);
-    assertEq(a.maxNumberOfTokensPerMsg, b.maxNumberOfTokensPerMsg);
-    assertEq(a.maxDataBytes, b.maxDataBytes);
-    assertEq(a.maxPoolReleaseOrMintGas, b.maxPoolReleaseOrMintGas);
   }
 }

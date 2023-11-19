@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.19;
 
-import {ITypeAndVersion} from "../../shared/interfaces/ITypeAndVersion.sol";
+import {TypeAndVersionInterface} from "../../interfaces/TypeAndVersionInterface.sol";
 import {ICommitStore} from "../interfaces/ICommitStore.sol";
 import {IARM} from "../interfaces/IARM.sol";
 import {IPool} from "../interfaces/pools/IPool.sol";
@@ -13,23 +13,21 @@ import {IAny2EVMOffRamp} from "../interfaces/IAny2EVMOffRamp.sol";
 import {Client} from "../libraries/Client.sol";
 import {Internal} from "../libraries/Internal.sol";
 import {RateLimiter} from "../libraries/RateLimiter.sol";
-import {CallWithExactGas} from "../../shared/call/CallWithExactGas.sol";
 import {OCR2BaseNoChecks} from "../ocr/OCR2BaseNoChecks.sol";
 import {AggregateRateLimiter} from "../AggregateRateLimiter.sol";
 import {EnumerableMapAddresses} from "../../shared/enumerable/EnumerableMapAddresses.sol";
 
-import {IERC20} from "../../vendor/openzeppelin-solidity/v4.8.0/contracts/token/ERC20/IERC20.sol";
-import {Address} from "../../vendor/openzeppelin-solidity/v4.8.0/contracts/utils/Address.sol";
-import {ERC165Checker} from "../../vendor/openzeppelin-solidity/v4.8.0/contracts/utils/introspection/ERC165Checker.sol";
+import {IERC20} from "../../vendor/openzeppelin-solidity/v4.8.0/token/ERC20/IERC20.sol";
+import {Address} from "../../vendor/openzeppelin-solidity/v4.8.0/utils/Address.sol";
+import {ERC165Checker} from "../../vendor/openzeppelin-solidity/v4.8.0/utils/introspection/ERC165Checker.sol";
 
 /// @notice EVM2EVMOffRamp enables OCR networks to execute multiple messages
 /// in an OffRamp in a single transaction.
-/// @dev The EVM2EVMOnRamp, CommitStore and EVM2EVMOffRamp form an xchain upgradeable unit. Any change to one of them
-/// results an onchain upgrade of all 3.
-/// @dev OCR2BaseNoChecks is used to save gas, signatures are not required as the offramp can only execute
-/// messages which are committed in the commitStore. We still make use of OCR2 as an executor whitelist
-/// and turn-taking mechanism.
-contract EVM2EVMOffRamp is IAny2EVMOffRamp, AggregateRateLimiter, ITypeAndVersion, OCR2BaseNoChecks {
+/// @dev We will always deploy an onRamp, commitStore, and offRamp at the same time
+/// and we will never do partial updates where e.g. only an offRamp gets replaced.
+/// If we would replace only the offRamp and connect it with an existing commitStore,
+/// a replay attack would be possible.
+contract EVM2EVMOffRamp is IAny2EVMOffRamp, AggregateRateLimiter, TypeAndVersionInterface, OCR2BaseNoChecks {
   using Address for address;
   using ERC165Checker for address;
   using EnumerableMapAddresses for EnumerableMapAddresses.AddressToAddressMap;
@@ -52,6 +50,7 @@ contract EVM2EVMOffRamp is IAny2EVMOffRamp, AggregateRateLimiter, ITypeAndVersio
   error CanOnlySelfCall();
   error ReceiverError(bytes error);
   error TokenHandlingError(bytes error);
+  error TokenRateLimitError(bytes error);
   error EmptyReport();
   error BadARMSignal();
   error InvalidMessageId();
@@ -63,11 +62,10 @@ contract EVM2EVMOffRamp is IAny2EVMOffRamp, AggregateRateLimiter, ITypeAndVersio
 
   event PoolAdded(address token, address pool);
   event PoolRemoved(address token, address pool);
-  /// @dev Atlas depends on this event, if changing, please notify Atlas.
+  // this event is needed for Atlas; if their structs/signature changes, we must update the ABIs there
   event ConfigSet(StaticConfig staticConfig, DynamicConfig dynamicConfig);
   event SkippedIncorrectNonce(uint64 indexed nonce, address indexed sender);
   event SkippedSenderWithPreviousRampMessageInflight(uint64 indexed nonce, address indexed sender);
-  /// @dev RMN depends on this event, if changing, please notify the RMN maintainers.
   event ExecutionStateChanged(
     uint64 indexed sequenceNumber,
     bytes32 indexed messageId,
@@ -76,12 +74,11 @@ contract EVM2EVMOffRamp is IAny2EVMOffRamp, AggregateRateLimiter, ITypeAndVersio
   );
 
   /// @notice Static offRamp config
-  /// @dev RMN depends on this struct, if changing, please notify the RMN maintainers.
   struct StaticConfig {
-    address commitStore; // ────────╮  CommitStore address on the destination chain
-    uint64 chainSelector; // ───────╯  Destination chainSelector
-    uint64 sourceChainSelector; // ─╮  Source chainSelector
-    address onRamp; // ─────────────╯  OnRamp address on the source chain
+    address commitStore; // --------┐  CommitStore address on the destination chain
+    uint64 chainSelector; // -------┘  Destination chainSelector
+    uint64 sourceChainSelector; // -┐  Source chainSelector
+    address onRamp; // -------------┘  OnRamp address on the source chain
     address prevOffRamp; //            Address of previous-version OffRamp
     address armProxy; //               ARM proxy address
   }
@@ -89,52 +86,46 @@ contract EVM2EVMOffRamp is IAny2EVMOffRamp, AggregateRateLimiter, ITypeAndVersio
   /// @notice Dynamic offRamp config
   /// @dev since OffRampConfig is part of OffRampConfigChanged event, if changing it, we should update the ABI on Atlas
   struct DynamicConfig {
-    uint32 permissionLessExecutionThresholdSeconds; // ─╮ Waiting time before manual execution is enabled
-    address router; // ─────────────────────────────────╯ Router address
-    address priceRegistry; // ──────────╮ Price registry address
-    uint16 maxNumberOfTokensPerMsg; //  │ Maximum number of ERC20 token transfers that can be included per message
-    uint32 maxDataBytes; //             │ Maximum payload data size in bytes
-    uint32 maxPoolReleaseOrMintGas; // ─╯ Maximum amount of gas passed on to token pool when calling releaseOrMint
+    uint32 permissionLessExecutionThresholdSeconds; // -┐ Waiting time before manual execution is enabled
+    address router; // ---------------------------------┘ Router address
+    address priceRegistry; // -----┐ Price registry address
+    uint16 maxTokensLength; //     | Maximum number of distinct ERC20 tokens that can be sent per message
+    uint32 maxDataSize; // --------┘ Maximum payload data size
   }
 
   // STATIC CONFIG
   // solhint-disable-next-line chainlink-solidity/all-caps-constant-storage-variables
-  string public constant override typeAndVersion = "EVM2EVMOffRamp 1.2.0";
-  /// @dev Commit store address on the destination chain
+  string public constant override typeAndVersion = "EVM2EVMOffRamp 1.0.0";
+  // The minimum amount of gas to perform the call with exact gas
+  uint16 private constant GAS_FOR_CALL_EXACT_CHECK = 5_000;
+  // Commit store address on the destination chain
   address internal immutable i_commitStore;
-  /// @dev ChainSelector of the source chain
+  // ChainSelector of the source chain
   uint64 internal immutable i_sourceChainSelector;
-  /// @dev ChainSelector of this chain
+  // ChainSelector of this chain
   uint64 internal immutable i_chainSelector;
-  /// @dev OnRamp address on the source chain
+  // OnRamp address on the source chain
   address internal immutable i_onRamp;
-  /// @dev metadataHash is a lane-specific prefix for a message hash preimage which ensures global uniqueness.
-  /// Ensures that 2 identical messages sent to 2 different lanes will have a distinct hash.
-  /// Must match the metadataHash used in computing leaf hashes offchain for the root committed in
-  /// the commitStore and i_metadataHash in the onRamp.
+  // metadataHash is a prefix for a message hash preimage to ensure uniqueness.
   bytes32 internal immutable i_metadataHash;
-  /// @dev The address of previous-version OffRamp for this lane.
-  /// Used to be able to provide sequencing continuity during a zero downtime upgrade.
+  /// @dev The address of previous-version OffRamp for this lane
   address internal immutable i_prevOffRamp;
   /// @dev The address of the arm proxy
   address internal immutable i_armProxy;
 
   // DYNAMIC CONFIG
   DynamicConfig internal s_dynamicConfig;
-  /// @dev source token => token pool
+  // source token => token pool
   EnumerableMapAddresses.AddressToAddressMap private s_poolsBySourceToken;
-  /// @dev dest token => token pool
+  // dest token => token pool
   EnumerableMapAddresses.AddressToAddressMap private s_poolsByDestToken;
 
   // STATE
-  /// @dev The expected nonce for a given sender.
-  /// Corresponds to s_senderNonce in the OnRamp, used to enforce that messages are
-  /// executed in the same order they are sent (assuming they are DON). Note that re-execution
-  /// of FAILED messages however, can be out of order.
+  // The expected nonce for a given sender.
   mapping(address sender => uint64 nonce) internal s_senderNonce;
-  /// @dev A mapping of sequence numbers to execution state using a bitmap with each execution
-  /// state only taking up 2 bits of the uint256, packing 128 states into a single slot.
-  /// Message state is tracked to ensure message can only be executed successfully once.
+  // A mapping of sequence numbers to execution state using a bitmap with each execution
+  // state only taking up 2 bits of the uint256, packing 128 states into a single slot.
+  // This state makes sure we never execute a message twice.
   mapping(uint64 seqNum => uint256 executionStateBitmap) internal s_executionStates;
 
   constructor(
@@ -167,7 +158,7 @@ contract EVM2EVMOffRamp is IAny2EVMOffRamp, AggregateRateLimiter, ITypeAndVersio
   }
 
   // ================================================================
-  // │                          Messaging                           │
+  // |                          Messaging                           |
   // ================================================================
 
   // The size of the execution state in bits
@@ -216,9 +207,6 @@ contract EVM2EVMOffRamp is IAny2EVMOffRamp, AggregateRateLimiter, ITypeAndVersio
 
   /// @notice Manually execute a message.
   /// @param report Internal.ExecutionReport.
-  /// @param gasLimitOverrides New gasLimit for each message in the report.
-  /// @dev We permit gas limit overrides so that users may manually execute messages which failed due to
-  /// insufficient gas provided.
   function manuallyExecute(Internal.ExecutionReport memory report, uint256[] memory gasLimitOverrides) external {
     // We do this here because the other _execute path is already covered OCR2BaseXXX.
     if (i_chainID != block.chainid) revert OCR2BaseNoChecks.ForkedChain(i_chainID, uint64(block.chainid));
@@ -243,8 +231,8 @@ contract EVM2EVMOffRamp is IAny2EVMOffRamp, AggregateRateLimiter, ITypeAndVersio
   /// @notice Executes a report, executing each message in order.
   /// @param report The execution report containing the messages and proofs.
   /// @param manualExecGasLimits An array of gas limits to use for manual execution.
-  /// @dev If called from the DON, this array is always empty.
-  /// @dev If called from manual execution, this array is always same length as messages.
+  /// If called from the DON, this array is always empty.
+  /// If called from manual execution, this array is always same length as messages.
   function _execute(Internal.ExecutionReport memory report, uint256[] memory manualExecGasLimits) internal whenHealthy {
     uint256 numMsgs = report.messages.length;
     if (numMsgs == 0) revert EmptyReport();
@@ -315,7 +303,9 @@ contract EVM2EVMOffRamp is IAny2EVMOffRamp, AggregateRateLimiter, ITypeAndVersio
         }
         // Otherwise this nonce is indeed the "transitional nonce", that is
         // all messages sent to v1 ramp have been executed by the DON and the sequence can resume in V2.
-        // Note if first time user in V2, then prevNonce will be 0, and message.nonce = 1, so this will be a no-op.
+        // Note if first time user in V2, then prevNonce will be 0,
+        // and message.nonce = 1, so this will be a no-op. If in strict mode and nonce isn't bumped due to failure,
+        // then we'll call the old offramp again until it succeeds.
         s_senderNonce[message.sender] = prevNonce;
       }
 
@@ -328,16 +318,8 @@ contract EVM2EVMOffRamp is IAny2EVMOffRamp, AggregateRateLimiter, ITypeAndVersio
         }
       }
 
-      // Although we expect only valid messages will be committed, we check again
-      // when executing as a defense in depth measure.
       bytes[] memory offchainTokenData = report.offchainTokenData[i];
-      _isWellFormed(
-        message.sequenceNumber,
-        message.sourceChainSelector,
-        message.tokenAmounts.length,
-        message.data.length,
-        offchainTokenData.length
-      );
+      _isWellFormed(message, offchainTokenData.length);
 
       _setExecutionState(message.sequenceNumber, Internal.MessageExecutionState.IN_PROGRESS);
       (Internal.MessageExecutionState newState, bytes memory returnData) = _trialExecute(message, offchainTokenData);
@@ -348,12 +330,21 @@ contract EVM2EVMOffRamp is IAny2EVMOffRamp, AggregateRateLimiter, ITypeAndVersio
       if (newState != Internal.MessageExecutionState.FAILURE && newState != Internal.MessageExecutionState.SUCCESS)
         revert InvalidNewState(message.sequenceNumber, newState);
 
-      // Nonce changes per state transition
-      // UNTOUCHED -> FAILURE  nonce bump
-      // UNTOUCHED -> SUCCESS  nonce bump
-      // FAILURE   -> FAILURE  no nonce bump
-      // FAILURE   -> SUCCESS  no nonce bump
-      if (originalState == Internal.MessageExecutionState.UNTOUCHED) {
+      // Nonce changes per state transition strict
+      // UNTOUCHED -> FAILURE  no nonce bump
+      // UNTOUCHED -> SUCCESS: nonce bump
+      // FAILURE   -> FAILURE: no nonce bump
+      // FAILURE   -> SUCCESS: nonce bump
+      if (message.strict) {
+        if (newState == Internal.MessageExecutionState.SUCCESS) {
+          s_senderNonce[message.sender]++;
+        }
+        // Nonce changes per state transition non-strict
+        // UNTOUCHED -> FAILURE  nonce bump
+        // UNTOUCHED -> SUCCESS  nonce bump
+        // FAILURE   -> FAILURE  no nonce bump
+        // FAILURE   -> SUCCESS  no nonce bump
+      } else if (originalState == Internal.MessageExecutionState.UNTOUCHED) {
         s_senderNonce[message.sender]++;
       }
 
@@ -362,29 +353,19 @@ contract EVM2EVMOffRamp is IAny2EVMOffRamp, AggregateRateLimiter, ITypeAndVersio
   }
 
   /// @notice Does basic message validation. Should never fail.
-  /// @param sequenceNumber Sequence number of the message.
-  /// @param sourceChainSelector SourceChainSelector of the message.
-  /// @param numberOfTokens Length of tokenAmounts array in the message.
-  /// @param dataLength Length of data field in the message.
-  /// @param offchainTokenDataLength Length of offchainTokenData array.
+  /// @param message The message to be validated.
   /// @dev reverts on validation failures.
-  function _isWellFormed(
-    uint64 sequenceNumber,
-    uint64 sourceChainSelector,
-    uint256 numberOfTokens,
-    uint256 dataLength,
-    uint256 offchainTokenDataLength
-  ) private view {
-    if (sourceChainSelector != i_sourceChainSelector) revert InvalidSourceChain(sourceChainSelector);
-    if (numberOfTokens > uint256(s_dynamicConfig.maxNumberOfTokensPerMsg))
-      revert UnsupportedNumberOfTokens(sequenceNumber);
-    if (numberOfTokens != offchainTokenDataLength) revert TokenDataMismatch(sequenceNumber);
-    if (dataLength > uint256(s_dynamicConfig.maxDataBytes))
-      revert MessageTooLarge(uint256(s_dynamicConfig.maxDataBytes), dataLength);
+  function _isWellFormed(Internal.EVM2EVMMessage memory message, uint256 offchainTokenDataLength) private view {
+    if (message.sourceChainSelector != i_sourceChainSelector) revert InvalidSourceChain(message.sourceChainSelector);
+    if (message.tokenAmounts.length > uint256(s_dynamicConfig.maxTokensLength))
+      revert UnsupportedNumberOfTokens(message.sequenceNumber);
+    if (message.tokenAmounts.length != offchainTokenDataLength) revert TokenDataMismatch(message.sequenceNumber);
+    if (message.data.length > uint256(s_dynamicConfig.maxDataSize))
+      revert MessageTooLarge(uint256(s_dynamicConfig.maxDataSize), message.data.length);
   }
 
   /// @notice Try executing a message.
-  /// @param message Internal.EVM2EVMMessage memory message.
+  /// @param message Client.Any2EVMMessage memory message.
   /// @param offchainTokenData Data provided by the DON for token transfers.
   /// @return the new state of the message, being either SUCCESS or FAILURE.
   /// @return revert data in bytes if CCIP receiver reverted during execution.
@@ -395,7 +376,7 @@ contract EVM2EVMOffRamp is IAny2EVMOffRamp, AggregateRateLimiter, ITypeAndVersio
     try this.executeSingleMessage(message, offchainTokenData) {} catch (bytes memory err) {
       if (ReceiverError.selector == bytes4(err) || TokenHandlingError.selector == bytes4(err)) {
         // If CCIP receiver execution is not successful, bubble up receiver revert data,
-        // prepended by the 4 bytes of ReceiverError.selector or TokenHandlingError.selector
+        // prepended by the 4 bytes of ReceiverError.selector
         // Max length of revert data is Router.MAX_RET_BYTES, max length of err is 4 + Router.MAX_RET_BYTES
         return (Internal.MessageExecutionState.FAILURE, err);
       } else {
@@ -410,10 +391,8 @@ contract EVM2EVMOffRamp is IAny2EVMOffRamp, AggregateRateLimiter, ITypeAndVersio
   /// @notice Execute a single message.
   /// @param message The message that will be executed.
   /// @param offchainTokenData Token transfer data to be passed to TokenPool.
-  /// @dev We make this external and callable by the contract itself, in order to try/catch
-  /// its execution and enforce atomicity among successful message processing and token transfer.
-  /// @dev We use ERC-165 to check for the ccipReceive interface to permit sending tokens to contracts
-  /// (for example smart contract wallets) without an associated message.
+  /// @dev this can only be called by the contract itself. It is part of
+  /// the Execute call, as we can only try/catch on external calls.
   function executeSingleMessage(Internal.EVM2EVMMessage memory message, bytes[] memory offchainTokenData) external {
     if (msg.sender != address(this)) revert CanOnlySelfCall();
     Client.EVMTokenAmount[] memory destTokenAmounts = new Client.EVMTokenAmount[](0);
@@ -422,7 +401,6 @@ contract EVM2EVMOffRamp is IAny2EVMOffRamp, AggregateRateLimiter, ITypeAndVersio
         message.tokenAmounts,
         abi.encode(message.sender),
         message.receiver,
-        message.sourceTokenData,
         offchainTokenData
       );
     }
@@ -430,9 +408,9 @@ contract EVM2EVMOffRamp is IAny2EVMOffRamp, AggregateRateLimiter, ITypeAndVersio
       !message.receiver.isContract() || !message.receiver.supportsInterface(type(IAny2EVMMessageReceiver).interfaceId)
     ) return;
 
-    (bool success, bytes memory returnData, ) = IRouter(s_dynamicConfig.router).routeMessage(
+    (bool success, bytes memory returnData) = IRouter(s_dynamicConfig.router).routeMessage(
       Internal._toAny2EVMMessage(message, destTokenAmounts),
-      Internal.GAS_FOR_CALL_EXACT_CHECK,
+      GAS_FOR_CALL_EXACT_CHECK,
       message.gasLimit,
       message.receiver
     );
@@ -446,12 +424,11 @@ contract EVM2EVMOffRamp is IAny2EVMOffRamp, AggregateRateLimiter, ITypeAndVersio
   }
 
   // ================================================================
-  // │                           Config                             │
+  // |                           Config                             |
   // ================================================================
 
   /// @notice Returns the static config.
   /// @dev This function will always return the same struct as the contents is static and can never change.
-  /// RMN depends on this function, if changing, please notify the RMN maintainers.
   function getStaticConfig() external view returns (StaticConfig memory) {
     return
       StaticConfig({
@@ -492,7 +469,7 @@ contract EVM2EVMOffRamp is IAny2EVMOffRamp, AggregateRateLimiter, ITypeAndVersio
   }
 
   // ================================================================
-  // │                      Tokens and pools                        │
+  // |                      Tokens and pools                        |
   // ================================================================
 
   /// @notice Get all supported source tokens
@@ -518,7 +495,9 @@ contract EVM2EVMOffRamp is IAny2EVMOffRamp, AggregateRateLimiter, ITypeAndVersio
   /// @param sourceToken The source token
   /// @return the destination token
   function getDestinationToken(IERC20 sourceToken) external view returns (IERC20) {
-    return getPoolBySourceToken(sourceToken).getToken();
+    (bool success, address pool) = s_poolsBySourceToken.tryGet(address(sourceToken));
+    if (!success) revert UnsupportedToken(sourceToken);
+    return IPool(pool).getToken();
   }
 
   /// @notice Get a token pool by its dest token
@@ -580,10 +559,7 @@ contract EVM2EVMOffRamp is IAny2EVMOffRamp, AggregateRateLimiter, ITypeAndVersio
 
   /// @notice Uses pools to release or mint a number of different tokens to a receiver address.
   /// @param sourceTokenAmounts List of tokens and amount values to be released/minted.
-  /// @param originalSender The message sender.
   /// @param receiver The address that will receive the tokens.
-  /// @param sourceTokenData Array of token data returned by token pools on the source chain.
-  /// @param offchainTokenData Array of token data fetched offchain by the DON.
   /// @dev This function wrappes the token pool call in a try catch block to gracefully handle
   /// any non-rate limiting errors that may occur. If we encounter a rate limiting related error
   /// we bubble it up. If we encounter a non-rate limiting error we wrap it in a TokenHandlingError.
@@ -591,51 +567,54 @@ contract EVM2EVMOffRamp is IAny2EVMOffRamp, AggregateRateLimiter, ITypeAndVersio
     Client.EVMTokenAmount[] memory sourceTokenAmounts,
     bytes memory originalSender,
     address receiver,
-    bytes[] memory sourceTokenData,
     bytes[] memory offchainTokenData
   ) internal returns (Client.EVMTokenAmount[] memory) {
     Client.EVMTokenAmount[] memory destTokenAmounts = new Client.EVMTokenAmount[](sourceTokenAmounts.length);
     for (uint256 i = 0; i < sourceTokenAmounts.length; ++i) {
       IPool pool = getPoolBySourceToken(IERC20(sourceTokenAmounts[i].token));
-      uint256 sourceTokenAmount = sourceTokenAmounts[i].amount;
 
-      // Call the pool with exact gas to increase resistance against malicious tokens or token pools.
-      // _callWithExactGas also protects against return data bombs by capping the return data size
-      // at MAX_RET_BYTES.
-      (bool success, bytes memory returnData, ) = CallWithExactGas._callWithExactGasSafeReturnData(
-        abi.encodeWithSelector(
-          pool.releaseOrMint.selector,
+      try
+        pool.releaseOrMint(
           originalSender,
           receiver,
-          sourceTokenAmount,
+          sourceTokenAmounts[i].amount,
           i_sourceChainSelector,
-          abi.encode(sourceTokenData[i], offchainTokenData[i])
-        ),
-        address(pool),
-        s_dynamicConfig.maxPoolReleaseOrMintGas,
-        Internal.GAS_FOR_CALL_EXACT_CHECK,
-        Internal.MAX_RET_BYTES
-      );
-
-      // wrap and rethrow the error so we can catch it lower in the stack
-      if (!success) revert TokenHandlingError(returnData);
+          offchainTokenData[i]
+        )
+      {} catch (
+        /// @dev we only want to revert on rate limiting errors, any other errors are
+        /// wrapped in a TokenHandlingError, which is caught above and handled gracefully.
+        bytes memory err
+      ) {
+        bytes4 errSig = bytes4(err);
+        if (
+          RateLimiter.BucketOverfilled.selector == errSig ||
+          RateLimiter.AggregateValueMaxCapacityExceeded.selector == errSig ||
+          RateLimiter.AggregateValueRateLimitReached.selector == errSig ||
+          RateLimiter.TokenMaxCapacityExceeded.selector == errSig ||
+          RateLimiter.TokenRateLimitReached.selector == errSig
+        ) {
+          revert TokenRateLimitError(err);
+        } else {
+          revert TokenHandlingError(err);
+        }
+      }
 
       destTokenAmounts[i].token = address(pool.getToken());
-      destTokenAmounts[i].amount = sourceTokenAmount;
+      destTokenAmounts[i].amount = sourceTokenAmounts[i].amount;
     }
     _rateLimitValue(destTokenAmounts, IPriceRegistry(s_dynamicConfig.priceRegistry));
     return destTokenAmounts;
   }
 
   // ================================================================
-  // │                        Access and ARM                        │
+  // |                        Access and ARM                        |
   // ================================================================
 
   /// @notice Reverts as this contract should not access CCIP messages
   function ccipReceive(Client.Any2EVMMessage calldata) external pure {
-    /* solhint-disable */
+    // solhint-disable-next-line reason-string
     revert();
-    /* solhint-enable*/
   }
 
   /// @notice Ensure that the ARM has not emitted a bad signal, and that the latest heartbeat is not stale.

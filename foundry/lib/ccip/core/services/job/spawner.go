@@ -42,7 +42,6 @@ type (
 	spawner struct {
 		orm              ORM
 		config           Config
-		checker          services.Checker
 		jobTypeDelegates map[Type]Delegate
 		activeJobs       map[int32]activeJob
 		activeJobsMu     sync.RWMutex
@@ -83,12 +82,11 @@ type (
 
 var _ Spawner = (*spawner)(nil)
 
-func NewSpawner(orm ORM, config Config, checker services.Checker, jobTypeDelegates map[Type]Delegate, db *sqlx.DB, lggr logger.Logger, lbDependentAwaiters []utils.DependentAwaiter) *spawner {
+func NewSpawner(orm ORM, config Config, jobTypeDelegates map[Type]Delegate, db *sqlx.DB, lggr logger.Logger, lbDependentAwaiters []utils.DependentAwaiter) *spawner {
 	namedLogger := lggr.Named("JobSpawner")
 	s := &spawner{
 		orm:                 orm,
 		config:              config,
-		checker:             checker,
 		jobTypeDelegates:    jobTypeDelegates,
 		q:                   pg.NewQ(db, namedLogger, config),
 		lggr:                namedLogger,
@@ -157,8 +155,7 @@ func (js *spawner) stopAllServices() {
 // stopService removes the job from memory and stop the services.
 // It will always delete the job from memory even if closing the services fail.
 func (js *spawner) stopService(jobID int32) {
-	lggr := js.lggr.With("jobID", jobID)
-	lggr.Debug("Stopping services for job")
+	js.lggr.Debugw("Stopping services for job", "jobID", jobID)
 	js.activeJobsMu.Lock()
 	defer js.activeJobsMu.Unlock()
 
@@ -166,32 +163,26 @@ func (js *spawner) stopService(jobID int32) {
 
 	for i := len(aj.services) - 1; i >= 0; i-- {
 		service := aj.services[i]
-		sLggr := lggr.With("subservice", i, "serviceType", reflect.TypeOf(service))
-		if c, ok := service.(services.Checkable); ok {
-			if err := js.checker.Unregister(c.Name()); err != nil {
-				sLggr.Warnw("Failed to unregister service from health checker", "err", err)
-			}
-		}
-		if err := service.Close(); err != nil {
-			sLggr.Criticalw("Error stopping job service", "err", err)
+		err := service.Close()
+		if err != nil {
+			js.lggr.Criticalw("Error stopping job service", "jobID", jobID, "err", err, "subservice", i, "serviceType", reflect.TypeOf(service))
 			js.SvcErrBuffer.Append(pkgerrors.Wrap(err, "error stopping job service"))
 		} else {
-			sLggr.Debug("Stopped job service")
+			js.lggr.Debugw("Stopped job service", "jobID", jobID, "subservice", i, "serviceType", fmt.Sprintf("%T", service))
 		}
 	}
-	lggr.Debug("Stopped all services for job")
+	js.lggr.Debugw("Stopped all services for job", "jobID", jobID)
 
 	delete(js.activeJobs, jobID)
 }
 
 func (js *spawner) StartService(ctx context.Context, jb Job, qopts ...pg.QOpt) error {
-	lggr := js.lggr.With("jobID", jb.ID)
 	js.activeJobsMu.Lock()
 	defer js.activeJobsMu.Unlock()
 
 	delegate, exists := js.jobTypeDelegates[jb.Type]
 	if !exists {
-		lggr.Errorw("Job type has not been registered with job.Spawner", "type", jb.Type)
+		js.lggr.Errorw("Job type has not been registered with job.Spawner", "type", jb.Type, "jobID", jb.ID)
 		return pkgerrors.Errorf("unregistered type %q for job: %d", jb.Type, jb.ID)
 	}
 	// We always add the active job in the activeJob map, even in the case
@@ -210,7 +201,7 @@ func (js *spawner) StartService(ctx context.Context, jb Job, qopts ...pg.QOpt) e
 
 	srvs, err := delegate.ServicesForSpec(jb, qopts...)
 	if err != nil {
-		lggr.Errorw("Error creating services for job", "err", err)
+		js.lggr.Errorw("Error creating services for job", "jobID", jb.ID, "err", err)
 		cctx, cancel := js.chStop.NewCtx()
 		defer cancel()
 		js.orm.TryRecordError(jb.ID, err.Error(), pg.WithParentCtx(cctx))
@@ -218,25 +209,18 @@ func (js *spawner) StartService(ctx context.Context, jb Job, qopts ...pg.QOpt) e
 		return pkgerrors.Wrapf(err, "failed to create services for job: %d", jb.ID)
 	}
 
-	lggr.Debugw("JobSpawner: Starting services for job", "count", len(srvs))
+	js.lggr.Debugw("JobSpawner: Starting services for job", "jobID", jb.ID, "count", len(srvs))
 
 	var ms services.MultiStart
 	for _, srv := range srvs {
 		err = ms.Start(ctx, srv)
 		if err != nil {
-			lggr.Criticalw("Error starting service for job", "err", err)
+			js.lggr.Critical("Error starting service for job", "jobID", jb.ID, "err", err)
 			return err
-		}
-		if c, ok := srv.(services.Checkable); ok {
-			err = js.checker.Register(c)
-			if err != nil {
-				lggr.Errorw("Error registering service with health checker", "err", err)
-				return err
-			}
 		}
 		aj.services = append(aj.services, srv)
 	}
-	lggr.Debugw("JobSpawner: Finished starting services for job", "count", len(srvs))
+	js.lggr.Debugw("JobSpawner: Finished starting services for job", "jobID", jb.ID, "count", len(srvs))
 	js.activeJobs[jb.ID] = aj
 	return nil
 }

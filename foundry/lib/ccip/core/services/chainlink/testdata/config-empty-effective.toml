@@ -1,3 +1,4 @@
+ExplorerURL = ''
 InsecureFastScrypt = false
 RootDir = '~/.chainlink'
 ShutdownGracePeriod = '5s'
@@ -7,6 +8,7 @@ FeedsManager = true
 LogPoller = false
 UICSAKeys = false
 CCIP = false
+LegacyGasStation = false
 
 [Database]
 DefaultIdleInTxSessionTimeout = '1h0m0s'
@@ -36,13 +38,13 @@ LeaseRefreshInterval = '1s'
 [TelemetryIngress]
 UniConn = true
 Logging = false
+ServerPubKey = ''
+URL = ''
 BufferSize = 100
 MaxBatchSize = 50
 SendInterval = '500ms'
 SendTimeout = '10s'
 UseBatchSend = true
-URL = ''
-ServerPubKey = ''
 
 [AuditLogger]
 Enabled = false

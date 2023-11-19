@@ -3,31 +3,33 @@ package ccip
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"fmt"
 	"math/big"
 	"sort"
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/pkg/errors"
 	"github.com/smartcontractkit/libocr/offchainreporting2plus/types"
 
+	"github.com/smartcontractkit/chainlink/v2/core/assets"
 	evmclient "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client"
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/gas"
 	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/logpoller"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/commit_store"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/evm_2_evm_offramp"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/price_registry"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/internal/ccipcalc"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/internal/ccipdata"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/internal/observability"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/internal/pricegetter"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/prices"
-	"github.com/smartcontractkit/chainlink/v2/core/utils/mathutil"
-
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/internal/cache"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/internal/hashlib"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/internal/merklemulti"
+	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/abihelpers"
+	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/cache"
+	ccipconfig "github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/config"
+	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/hasher"
+	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/merklemulti"
+	"github.com/smartcontractkit/chainlink/v2/core/services/pg"
 )
 
 const (
@@ -49,125 +51,91 @@ type update struct {
 	value     *big.Int
 }
 
-type CommitPluginStaticConfig struct {
-	lggr logger.Logger
-	// Source
-	onRampReader        ccipdata.OnRampReader
-	sourceChainSelector uint64
-	sourceNative        common.Address
-	// Dest
-	destLP         logpoller.LogPoller
-	offRamp        ccipdata.OffRampReader
-	commitStore    ccipdata.CommitStoreReader
-	destClient     evmclient.Client
-	destChainEVMID *big.Int
-	// Offchain
-	priceGetter pricegetter.PriceGetter
+type CommitPluginConfig struct {
+	lggr                     logger.Logger
+	sourceLP, destLP         logpoller.LogPoller
+	offRamp                  evm_2_evm_offramp.EVM2EVMOffRampInterface
+	onRampAddress            common.Address
+	commitStore              commit_store.CommitStoreInterface
+	priceGetter              PriceGetter
+	sourceChainSelector      uint64
+	sourceNative             common.Address
+	sourceFeeEstimator       gas.EvmFeeEstimator
+	sourceClient, destClient evmclient.Client
+	leafHasher               hasher.LeafHasherInterface[[32]byte]
+	getSeqNumFromLog         func(log logpoller.Log) (uint64, error)
+	checkFinalityTags        bool
 }
 
 type CommitReportingPlugin struct {
-	lggr logger.Logger
-	// Source
-	onRampReader        ccipdata.OnRampReader
-	sourceChainSelector uint64
-	sourceNative        common.Address
-	gasPriceEstimator   prices.GasPriceEstimatorCommit
-	// Dest
-	commitStoreReader       ccipdata.CommitStoreReader
-	destPriceRegistryReader ccipdata.PriceRegistryReader
-	offchainConfig          ccipdata.CommitOffchainConfig
-	tokenDecimalsCache      cache.AutoSync[map[common.Address]uint8]
-	F                       int
-	// Offchain
-	priceGetter pricegetter.PriceGetter
-	// State
-	inflightReports *inflightCommitReportsContainer
+	config                CommitPluginConfig
+	F                     int
+	lggr                  logger.Logger
+	inflightReports       *inflightCommitReportsContainer
+	destPriceRegistry     price_registry.PriceRegistryInterface
+	offchainConfig        ccipconfig.CommitOffchainConfig
+	onchainConfig         ccipconfig.CommitOnchainConfig
+	tokenToDecimalMapping *cache.CachedChain[map[common.Address]uint8]
 }
 
 type CommitReportingPluginFactory struct {
-	// Configuration derived from the job spec which does not change
-	// between plugin instances (ie between SetConfigs onchain)
-	config CommitPluginStaticConfig
+	config CommitPluginConfig
 
-	// Dynamic readers
-	readersMu          *sync.Mutex
-	destPriceRegReader ccipdata.PriceRegistryReader
-	destPriceRegAddr   common.Address
+	// We keep track of the registered filters
+	sourceChainFilters []logpoller.Filter
+	destChainFilters   []logpoller.Filter
+	filtersMu          *sync.Mutex
 }
 
 // NewCommitReportingPluginFactory return a new CommitReportingPluginFactory.
-func NewCommitReportingPluginFactory(config CommitPluginStaticConfig) *CommitReportingPluginFactory {
+func NewCommitReportingPluginFactory(config CommitPluginConfig) *CommitReportingPluginFactory {
 	return &CommitReportingPluginFactory{
 		config:    config,
-		readersMu: &sync.Mutex{},
-
-		// the fields below are initially empty and populated on demand
-		destPriceRegReader: nil,
-		destPriceRegAddr:   common.Address{},
+		filtersMu: &sync.Mutex{},
 	}
-}
-
-func (rf *CommitReportingPluginFactory) UpdateDynamicReaders(newPriceRegAddr common.Address) error {
-	rf.readersMu.Lock()
-	defer rf.readersMu.Unlock()
-	// TODO: Investigate use of Close() to cleanup.
-	// TODO: a true price registry upgrade on an existing lane may want some kind of start block in its config? Right now we
-	// essentially assume that plugins don't care about historical price reg logs.
-	if rf.destPriceRegAddr == newPriceRegAddr {
-		// No-op
-		return nil
-	}
-	// Close old reader if present and open new reader if address changed
-	if rf.destPriceRegReader != nil {
-		if err := rf.destPriceRegReader.Close(); err != nil {
-			return err
-		}
-	}
-	destPriceRegistryReader, err := ccipdata.NewPriceRegistryReader(rf.config.lggr, newPriceRegAddr, rf.config.destLP, rf.config.destClient)
-	if err != nil {
-		return err
-	}
-	destPriceRegistryReader = observability.NewPriceRegistryReader(destPriceRegistryReader, rf.config.destClient.ConfiguredChainID().Int64(), CommitPluginLabel)
-	rf.destPriceRegReader = destPriceRegistryReader
-	rf.destPriceRegAddr = newPriceRegAddr
-	return nil
 }
 
 // NewReportingPlugin returns the ccip CommitReportingPlugin and satisfies the ReportingPluginFactory interface.
 func (rf *CommitReportingPluginFactory) NewReportingPlugin(config types.ReportingPluginConfig) (types.ReportingPlugin, types.ReportingPluginInfo, error) {
-	destPriceReg, err := rf.config.commitStore.ChangeConfig(config.OnchainConfig, config.OffchainConfig)
+	onchainConfig, err := abihelpers.DecodeAbiStruct[ccipconfig.CommitOnchainConfig](config.OnchainConfig)
 	if err != nil {
 		return nil, types.ReportingPluginInfo{}, err
 	}
-	if err = rf.UpdateDynamicReaders(destPriceReg); err != nil {
+	offchainConfig, err := ccipconfig.DecodeOffchainConfig[ccipconfig.CommitOffchainConfig](config.OffchainConfig)
+	if err != nil {
 		return nil, types.ReportingPluginInfo{}, err
 	}
-
+	destPriceRegistry, err := price_registry.NewPriceRegistry(onchainConfig.PriceRegistry, rf.config.destClient)
 	if err != nil {
 		return nil, types.ReportingPluginInfo{}, err
 	}
 
-	pluginOffChainConfig := rf.config.commitStore.OffchainConfig()
+	// TODO How to pass qopts here
+	if err = rf.UpdateLogPollerFilters(onchainConfig.PriceRegistry); err != nil {
+		return nil, types.ReportingPluginInfo{}, err
+	}
+
+	rf.config.lggr.Infow("NewReportingPlugin",
+		"offchainConfig", offchainConfig,
+		"onchainConfig", onchainConfig,
+	)
 
 	return &CommitReportingPlugin{
-			sourceChainSelector:     rf.config.sourceChainSelector,
-			sourceNative:            rf.config.sourceNative,
-			onRampReader:            rf.config.onRampReader,
-			commitStoreReader:       rf.config.commitStore,
-			priceGetter:             rf.config.priceGetter,
-			F:                       config.F,
-			lggr:                    rf.config.lggr.Named("CommitReportingPlugin"),
-			inflightReports:         newInflightCommitReportsContainer(rf.config.commitStore.OffchainConfig().InflightCacheExpiry),
-			destPriceRegistryReader: rf.destPriceRegReader,
-			tokenDecimalsCache: cache.NewTokenToDecimals(
+			config:            rf.config,
+			F:                 config.F,
+			lggr:              rf.config.lggr.Named("CommitReportingPlugin"),
+			inflightReports:   newInflightCommitReportsContainer(offchainConfig.InflightCacheExpiry.Duration()),
+			destPriceRegistry: destPriceRegistry,
+			onchainConfig:     onchainConfig,
+			offchainConfig:    offchainConfig,
+			tokenToDecimalMapping: cache.NewTokenToDecimals(
 				rf.config.lggr,
 				rf.config.destLP,
 				rf.config.offRamp,
-				rf.destPriceRegReader,
-				int64(rf.config.commitStore.OffchainConfig().DestFinalityDepth),
+				destPriceRegistry,
+				rf.config.destClient,
+				int64(offchainConfig.DestFinalityDepth),
 			),
-			gasPriceEstimator: rf.config.commitStore.GasPriceEstimator(),
-			offchainConfig:    pluginOffChainConfig,
 		},
 		types.ReportingPluginInfo{
 			Name:          "CCIPCommit",
@@ -187,16 +155,11 @@ func (r *CommitReportingPlugin) Query(context.Context, types.ReportTimestamp) (t
 
 // Observation calculates the sequence number interval ready to be committed and
 // the token and gas price updates required. A valid report could contain a merkle
-// root and price updates. Price updates should never contain nil values, otherwise
-// the observation will be considered invalid and rejected.
+// root and/or price updates.
 func (r *CommitReportingPlugin) Observation(ctx context.Context, epochAndRound types.ReportTimestamp, _ types.Query) (types.Observation, error) {
 	lggr := r.lggr.Named("CommitObservation")
 	// If the commit store is down the protocol should halt.
-	down, err := r.commitStoreReader.IsDown(ctx)
-	if err != nil {
-		return nil, errors.Wrap(err, "isDown check errored")
-	}
-	if down {
+	if isCommitStoreDownNow(ctx, lggr, r.config.commitStore) {
 		return nil, ErrCommitStoreIsDown
 	}
 	r.inflightReports.expire(lggr)
@@ -208,12 +171,7 @@ func (r *CommitReportingPlugin) Observation(ctx context.Context, epochAndRound t
 		return nil, err
 	}
 
-	tokenDecimals, err := r.tokenDecimalsCache.Get(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("get token decimals: %w", err)
-	}
-
-	sourceGasPriceUSD, tokenPricesUSD, err := r.generatePriceUpdates(ctx, lggr, tokenDecimals)
+	sourceGasPriceUSD, tokenPricesUSD, err := r.generatePriceUpdates(ctx, lggr, time.Now())
 	if err != nil {
 		return nil, err
 	}
@@ -227,7 +185,7 @@ func (r *CommitReportingPlugin) Observation(ctx context.Context, epochAndRound t
 	// Even if all values are empty we still want to communicate our observation
 	// with the other nodes, therefore, we always return the observed values.
 	return CommitObservation{
-		Interval: ccipdata.CommitStoreInterval{
+		Interval: commit_store.CommitStoreInterval{
 			Min: min,
 			Max: max,
 		},
@@ -236,40 +194,116 @@ func (r *CommitReportingPlugin) Observation(ctx context.Context, epochAndRound t
 	}.Marshal()
 }
 
+// UpdateLogPollerFilters updates the log poller filters for the source and destination chains.
+// pass zeroAddress if destPriceRegistry is unknown, filters with zero address are omitted.
+func (rf *CommitReportingPluginFactory) UpdateLogPollerFilters(destPriceRegistry common.Address, qopts ...pg.QOpt) error {
+	rf.filtersMu.Lock()
+	defer rf.filtersMu.Unlock()
+
+	// source chain filters
+	sourceFiltersBefore, sourceFiltersNow := rf.sourceChainFilters, getCommitPluginSourceLpFilters(rf.config.onRampAddress)
+	created, deleted := filtersDiff(sourceFiltersBefore, sourceFiltersNow)
+	if err := unregisterLpFilters(rf.config.sourceLP, deleted, qopts...); err != nil {
+		return err
+	}
+	if err := registerLpFilters(rf.config.sourceLP, created, qopts...); err != nil {
+		return err
+	}
+	rf.sourceChainFilters = sourceFiltersNow
+
+	// destination chain filters
+	destFiltersBefore, destFiltersNow := rf.destChainFilters, getCommitPluginDestLpFilters(destPriceRegistry, rf.config.offRamp.Address())
+	created, deleted = filtersDiff(destFiltersBefore, destFiltersNow)
+	if err := unregisterLpFilters(rf.config.destLP, deleted, qopts...); err != nil {
+		return err
+	}
+	if err := registerLpFilters(rf.config.destLP, created, qopts...); err != nil {
+		return err
+	}
+	rf.destChainFilters = destFiltersNow
+
+	return nil
+}
+
+func (r *CommitReportingPlugin) finalizedLogsGreaterThanMinSeq(ctx context.Context, nextMin uint64) ([]logpoller.Log, error) {
+	if !r.config.checkFinalityTags {
+		return r.config.sourceLP.LogsDataWordGreaterThan(
+			abihelpers.EventSignatures.SendRequested,
+			r.config.onRampAddress,
+			abihelpers.EventSignatures.SendRequestedSequenceNumberWord,
+			abihelpers.EvmWord(nextMin),
+			int(r.offchainConfig.SourceFinalityDepth),
+			pg.WithParentCtx(ctx),
+		)
+	}
+	// If the chain is based on explicit finality we only examine logs less than or equal to the latest finalized block number.
+	// NOTE: there appears to be a bug in ethclient whereby BlockByNumber fails with "unsupported txtype" when trying to parse the block
+	// when querying L2s, headers however work.
+	// TODO (CCIP-778): Migrate to core finalized tags, below doesn't work for some chains e.g. Celo.
+	latestFinalizedHeader, err := r.config.sourceClient.HeaderByNumber(ctx, big.NewInt(rpc.FinalizedBlockNumber.Int64()))
+	if err != nil {
+		return nil, err
+	}
+	if latestFinalizedHeader == nil {
+		return nil, errors.New("latest finalized header is nil")
+	}
+	if latestFinalizedHeader.Number == nil {
+		return nil, errors.New("latest finalized number is nil")
+	}
+	return r.config.sourceLP.LogsUntilBlockHashDataWordGreaterThan(
+		abihelpers.EventSignatures.SendRequested,
+		r.config.onRampAddress,
+		abihelpers.EventSignatures.SendRequestedSequenceNumberWord,
+		abihelpers.EvmWord(nextMin),
+		latestFinalizedHeader.Hash(),
+		pg.WithParentCtx(ctx),
+	)
+}
+
 func (r *CommitReportingPlugin) calculateMinMaxSequenceNumbers(ctx context.Context, lggr logger.Logger) (uint64, uint64, error) {
 	nextInflightMin, _, err := r.nextMinSeqNum(ctx, lggr)
 	if err != nil {
 		return 0, 0, err
 	}
 
-	msgRequests, err := r.onRampReader.GetSendRequestsGteSeqNum(ctx, nextInflightMin, int(r.offchainConfig.SourceFinalityDepth))
+	// Gather only finalized logs.
+	reqs, err := r.finalizedLogsGreaterThanMinSeq(ctx, nextInflightMin)
 	if err != nil {
 		return 0, 0, err
 	}
-	if len(msgRequests) == 0 {
+	if len(reqs) == 0 {
 		lggr.Infow("No new requests", "minSeqNr", nextInflightMin)
 		return 0, 0, nil
 	}
-	seqNrs := make([]uint64, 0, len(msgRequests))
-	for _, msgReq := range msgRequests {
-		seqNrs = append(seqNrs, msgReq.Data.SequenceNumber)
+	var seqNrs []uint64
+	for _, req := range reqs {
+		seqNr, err2 := r.config.getSeqNumFromLog(req)
+		if err2 != nil {
+			lggr.Errorw("Error parsing seq num", "err", err2)
+			continue
+		}
+		seqNrs = append(seqNrs, seqNr)
 	}
 
-	minSeqNr := seqNrs[0]
-	maxSeqNr := seqNrs[len(seqNrs)-1]
-	if minSeqNr != nextInflightMin {
+	if len(seqNrs) == 0 {
+		lggr.Infow("Could not parse any sequence number", "minSeqNr", nextInflightMin, "reqs", len(reqs))
+		return 0, 0, nil
+	}
+	min := seqNrs[0]
+	max := seqNrs[len(seqNrs)-1]
+	if min != nextInflightMin {
 		// Still report the observation as even partial reports have value e.g. all nodes are
 		// missing a single, different log each, they would still be able to produce a valid report.
-		lggr.Warnf("Missing sequence number range [%d-%d]", nextInflightMin, minSeqNr)
+		lggr.Warnf("Missing sequence number range [%d-%d]", nextInflightMin, min)
 	}
-	if !ccipcalc.ContiguousReqs(lggr, minSeqNr, maxSeqNr, seqNrs) {
+	if !contiguousReqs(lggr, min, max, seqNrs) {
 		return 0, 0, errors.New("unexpected gap in seq nums")
 	}
-	return minSeqNr, maxSeqNr, nil
+	return min, max, nil
 }
 
 func (r *CommitReportingPlugin) nextMinSeqNum(ctx context.Context, lggr logger.Logger) (inflightMin, onChainMin uint64, err error) {
-	nextMinOnChain, err := r.commitStoreReader.GetExpectedNextSequenceNumber(ctx)
+	nextMinOnChain, err := r.config.commitStore.GetExpectedNextSequenceNumber(&bind.CallOpts{Context: ctx})
 	if err != nil {
 		return 0, 0, err
 	}
@@ -291,47 +325,48 @@ func (r *CommitReportingPlugin) nextMinSeqNum(ctx context.Context, lggr logger.L
 		r.inflightReports.reset(lggr)
 		return nextMinOnChain, nextMinOnChain, nil
 	}
-	return mathutil.Max(nextMinOnChain, maxInflight+1), nextMinOnChain, nil
+	return max(nextMinOnChain, maxInflight+1), nextMinOnChain, nil
 }
 
-// All prices are USD ($1=1e18) denominated. All prices must be not nil.
-// Return token prices should contain the exact same tokens as in tokenDecimals.
+// All prices are USD ($1=1e18) denominated. We only generate prices we think should be updated;
+// otherwise, omitting values means voting to skip updating them
 func (r *CommitReportingPlugin) generatePriceUpdates(
 	ctx context.Context,
 	lggr logger.Logger,
-	tokenDecimals map[common.Address]uint8,
-) (sourceGasPriceUSD prices.GasPrice, tokenPricesUSD map[common.Address]*big.Int, err error) {
-	tokensWithDecimal := make([]common.Address, 0, len(tokenDecimals))
-	for token := range tokenDecimals {
+	now time.Time,
+) (sourceGasPriceUSD *big.Int, tokenPricesUSD map[common.Address]*big.Int, err error) {
+	tokenToDecimalMappingValue, err := r.tokenToDecimalMapping.Get(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	tokensWithDecimal := make([]common.Address, 0, len(tokenToDecimalMappingValue))
+	for token := range tokenToDecimalMappingValue {
 		tokensWithDecimal = append(tokensWithDecimal, token)
 	}
 
+	queryTokens := append([]common.Address{r.config.sourceNative}, tokensWithDecimal...)
 	// Include wrapped native in our token query as way to identify the source native USD price.
 	// notice USD is in 1e18 scale, i.e. $1 = 1e18
-	queryTokens := append([]common.Address{r.sourceNative}, tokensWithDecimal...)
-	sort.Slice(queryTokens, func(i, j int) bool { return queryTokens[i].String() < queryTokens[j].String() }) // make the query deterministic
-
-	rawTokenPricesUSD, err := r.priceGetter.TokenPricesUSD(ctx, queryTokens)
+	rawTokenPricesUSD, err := r.config.priceGetter.TokenPricesUSD(ctx, queryTokens)
 	if err != nil {
 		return nil, nil, err
 	}
 	lggr.Infow("Raw token prices", "rawTokenPrices", rawTokenPricesUSD)
-
-	// make sure that we got prices for all the tokens of our query
 	for _, token := range queryTokens {
 		if rawTokenPricesUSD[token] == nil {
 			return nil, nil, errors.Errorf("missing token price: %+v", token)
 		}
 	}
 
-	sourceNativePriceUSD, exists := rawTokenPricesUSD[r.sourceNative]
+	sourceNativePriceUSD, exists := rawTokenPricesUSD[r.config.sourceNative]
 	if !exists {
-		return nil, nil, fmt.Errorf("missing source native (%s) price", r.sourceNative)
+		return nil, nil, fmt.Errorf("missing source native (%s) price", r.config.sourceNative)
 	}
 
 	tokenPricesUSD = make(map[common.Address]*big.Int, len(rawTokenPricesUSD))
 	for token := range rawTokenPricesUSD {
-		decimals, exists := tokenDecimals[token]
+		decimals, exists := tokenToDecimalMappingValue[token]
 		if !exists {
 			// do not include any address which isn't a supported token on dest chain, including sourceNative
 			lggr.Infow("Skipping token not supported on dest chain", "token", token)
@@ -339,21 +374,55 @@ func (r *CommitReportingPlugin) generatePriceUpdates(
 		}
 		tokenPricesUSD[token] = calculateUsdPer1e18TokenAmount(rawTokenPricesUSD[token], decimals)
 	}
+	lggr.Infow("Token prices", "tokenPrices", tokenPricesUSD, "sourceNativePriceUSD", sourceNativePriceUSD)
 
-	sourceGasPrice, err := r.gasPriceEstimator.GetGasPrice(ctx)
+	// Observe a source chain price for pricing.
+	sourceGasPriceWei, _, err := r.config.sourceFeeEstimator.GetFee(ctx, nil, 0, assets.NewWei(big.NewInt(int64(r.offchainConfig.MaxGasPrice))))
 	if err != nil {
 		return nil, nil, err
 	}
-	if sourceGasPrice == nil {
-		return nil, nil, errors.Errorf("missing gas price")
+	// Use legacy if no dynamic is available.
+	gasPrice := sourceGasPriceWei.Legacy.ToInt()
+	if sourceGasPriceWei.DynamicFeeCap != nil {
+		gasPrice = sourceGasPriceWei.DynamicFeeCap.ToInt()
 	}
-	sourceGasPriceUSD, err = r.gasPriceEstimator.DenoteInUSD(sourceGasPrice, sourceNativePriceUSD)
+	if gasPrice == nil {
+		return nil, nil, fmt.Errorf("missing gas price %+v", sourceGasPriceWei)
+	}
+
+	sourceGasPriceUSD = calculateUsdPerUnitGas(gasPrice, sourceNativePriceUSD)
+
+	gasPriceUpdate, err := r.getLatestGasPriceUpdate(ctx, now, true)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	lggr.Infow("Observing gas price", "observedGasPriceWei", sourceGasPrice, "observedGasPriceUSD", sourceGasPriceUSD)
-	lggr.Infow("Observing token prices", "tokenPrices", tokenPricesUSD, "sourceNativePriceUSD", sourceNativePriceUSD)
+	lggr.Infow("Observing gas price",
+		"latestGasPriceUSD", gasPriceUpdate.value,
+		"observedGasPriceWei", gasPrice,
+		"observedGasPriceUSD", sourceGasPriceUSD)
+	if gasPriceUpdate.value != nil && now.Sub(gasPriceUpdate.timestamp) < r.offchainConfig.FeeUpdateHeartBeat.Duration() && !deviates(sourceGasPriceUSD, gasPriceUpdate.value, int64(r.offchainConfig.FeeUpdateDeviationPPB)) {
+		// vote skip gasPrice update by leaving it nil
+		sourceGasPriceUSD = nil
+	}
+
+	tokenPriceUpdates, err := r.getLatestTokenPriceUpdates(ctx, now, true)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	lggr.Infow("Observing token prices",
+		"latestTokenPricesUSD", tokenPriceUpdates,
+		"observedTokenPricesUSD", tokenPricesUSD)
+	for token, price := range tokenPricesUSD {
+		tokenUpdate := tokenPriceUpdates[token]
+		if tokenUpdate.value != nil && now.Sub(tokenUpdate.timestamp) < r.offchainConfig.FeeUpdateHeartBeat.Duration() && !deviates(price, tokenUpdate.value, int64(r.offchainConfig.FeeUpdateDeviationPPB)) {
+			// vote skip tokenPrice update by not including it in price map
+			delete(tokenPricesUSD, token)
+		}
+	}
+
+	// either may be empty
 	return sourceGasPriceUSD, tokenPricesUSD, nil
 }
 
@@ -366,26 +435,24 @@ func calculateUsdPer1e18TokenAmount(price *big.Int, decimals uint8) *big.Int {
 }
 
 // Gets the latest token price updates based on logs within the heartbeat
-// The updates returned by this function are guaranteed to not contain nil values.
 func (r *CommitReportingPlugin) getLatestTokenPriceUpdates(ctx context.Context, now time.Time, checkInflight bool) (map[common.Address]update, error) {
-	tokenPriceUpdates, err := r.destPriceRegistryReader.GetTokenPriceUpdatesCreatedAfter(
-		ctx,
-		now.Add(-r.offchainConfig.TokenPriceHeartBeat),
-		0,
-	)
+	tokenUpdatesWithinHeartBeat, err := r.config.destLP.LogsCreatedAfter(abihelpers.EventSignatures.UsdPerTokenUpdated, r.destPriceRegistry.Address(), now.Add(-r.offchainConfig.FeeUpdateHeartBeat.Duration()), 0, pg.WithParentCtx(ctx))
+	latestUpdates := make(map[common.Address]update)
+
 	if err != nil {
 		return nil, err
 	}
-
-	latestUpdates := make(map[common.Address]update)
-	for _, tokenUpdate := range tokenPriceUpdates {
-		priceUpdate := tokenUpdate.Data
+	for _, log := range tokenUpdatesWithinHeartBeat {
 		// Ordered by ascending timestamps
-		timestamp := time.Unix(priceUpdate.TimestampUnixSec.Int64(), 0)
-		if priceUpdate.Value != nil && !timestamp.Before(latestUpdates[priceUpdate.Token].timestamp) {
-			latestUpdates[priceUpdate.Token] = update{
+		tokenUpdate, err := r.destPriceRegistry.ParseUsdPerTokenUpdated(log.GetGethLog())
+		if err != nil {
+			return nil, err
+		}
+		timestamp := time.Unix(tokenUpdate.Timestamp.Int64(), 0)
+		if !timestamp.Before(latestUpdates[tokenUpdate.Token].timestamp) {
+			latestUpdates[tokenUpdate.Token] = update{
 				timestamp: timestamp,
-				value:     priceUpdate.Value,
+				value:     tokenUpdate.Value,
 			}
 		}
 	}
@@ -398,74 +465,70 @@ func (r *CommitReportingPlugin) getLatestTokenPriceUpdates(ctx context.Context, 
 	// leaving it as is, as token prices are updated infrequently, so this should not cause many issues
 	latestInflightTokenPriceUpdates := r.inflightReports.latestInflightTokenPriceUpdates()
 	for inflightToken, latestInflightUpdate := range latestInflightTokenPriceUpdates {
-		if latestInflightUpdate.timestamp.After(latestUpdates[inflightToken].timestamp) && latestInflightUpdate.value != nil {
+		if latestInflightUpdate.timestamp.After(latestUpdates[inflightToken].timestamp) {
 			latestUpdates[inflightToken] = latestInflightUpdate
 		}
 	}
-
 	return latestUpdates, nil
 }
 
-// getLatestGasPriceUpdate returns the latest gas price update based on logs within the heartbeat.
-// If an update is found, it is not expected to contain a nil value. If no updates found, empty update with nil value is returned.
-func (r *CommitReportingPlugin) getLatestGasPriceUpdate(ctx context.Context, now time.Time, checkInflight bool) (gasUpdate update, error error) {
+// Gets the latest gas price updates based on logs within the heartbeat
+func (r *CommitReportingPlugin) getLatestGasPriceUpdate(ctx context.Context, now time.Time, checkInflight bool) (gasPriceUpdate update, error error) {
 	if checkInflight {
-		latestInflightGasPriceUpdates := r.inflightReports.latestInflightGasPriceUpdates()
-		if inflightUpdate, exists := latestInflightGasPriceUpdates[r.sourceChainSelector]; exists {
-			gasUpdate = inflightUpdate
-			r.lggr.Infow("Latest gas price from inflight", "gasPriceUpdateVal", gasUpdate.value, "gasPriceUpdateTs", gasUpdate.timestamp)
+		latestInflightGasPriceUpdate := r.inflightReports.getLatestInflightGasPriceUpdate()
+		if latestInflightGasPriceUpdate != nil && latestInflightGasPriceUpdate.timestamp.After(gasPriceUpdate.timestamp) {
+			gasPriceUpdate = *latestInflightGasPriceUpdate
+		}
 
+		if gasPriceUpdate.value != nil {
+			r.lggr.Infow("Latest gas price from inflight", "gasPriceUpdateVal", gasPriceUpdate.value, "gasPriceUpdateTs", gasPriceUpdate.timestamp)
 			// Gas price can fluctuate frequently, many updates may be in flight.
 			// If there is gas price update inflight, use it as source of truth, no need to check onchain.
-			return gasUpdate, nil
+			return gasPriceUpdate, nil
 		}
 	}
 
 	// If there are no price updates inflight, check latest prices onchain
-	gasPriceUpdates, err := r.destPriceRegistryReader.GetGasPriceUpdatesCreatedAfter(
-		ctx,
-		r.sourceChainSelector,
-		now.Add(-r.offchainConfig.GasPriceHeartBeat),
+	gasUpdatesWithinHeartBeat, err := r.config.destLP.IndexedLogsCreatedAfter(
+		abihelpers.EventSignatures.UsdPerUnitGasUpdated,
+		r.destPriceRegistry.Address(),
+		1,
+		[]common.Hash{abihelpers.EvmWord(r.config.sourceChainSelector)},
+		now.Add(-r.offchainConfig.FeeUpdateHeartBeat.Duration()),
 		0,
+		pg.WithParentCtx(ctx),
 	)
 	if err != nil {
 		return update{}, err
 	}
 
-	for _, priceUpdate := range gasPriceUpdates {
+	for _, log := range gasUpdatesWithinHeartBeat {
 		// Ordered by ascending timestamps
-		timestamp := time.Unix(priceUpdate.Data.TimestampUnixSec.Int64(), 0)
-		if !timestamp.Before(gasUpdate.timestamp) {
-			gasUpdate = update{
+		priceUpdate, err2 := r.destPriceRegistry.ParseUsdPerUnitGasUpdated(log.GetGethLog())
+		if err2 != nil {
+			return update{}, err2
+		}
+		timestamp := time.Unix(priceUpdate.Timestamp.Int64(), 0)
+		if !timestamp.Before(gasPriceUpdate.timestamp) {
+			gasPriceUpdate = update{
 				timestamp: timestamp,
-				value:     priceUpdate.Data.Value,
+				value:     priceUpdate.Value,
 			}
 		}
 	}
 
-	r.lggr.Infow("Latest gas price from log poller", "gasPriceUpdateVal", gasUpdate.value, "gasPriceUpdateTs", gasUpdate.timestamp)
-	return gasUpdate, nil
+	if gasPriceUpdate.value != nil {
+		r.lggr.Infow("Latest gas price from log poller", "gasPriceUpdateVal", gasPriceUpdate.value, "gasPriceUpdateTs", gasPriceUpdate.timestamp)
+	}
+
+	return gasPriceUpdate, nil
 }
 
 func (r *CommitReportingPlugin) Report(ctx context.Context, epochAndRound types.ReportTimestamp, _ types.Query, observations []types.AttributedObservation) (bool, types.Report, error) {
-	now := time.Now()
 	lggr := r.lggr.Named("CommitReport")
 	parsableObservations := getParsableObservations[CommitObservation](lggr, observations)
-
-	// tokens in the tokenDecimalsCache represent supported tokens on the dest chain
-	supportedTokensMap, err := r.tokenDecimalsCache.Get(ctx)
-	if err != nil {
-		return false, nil, err
-	}
-
-	// Filters out parsable but faulty observations
-	validObservations, err := validateObservations(ctx, lggr, supportedTokensMap, r.F, parsableObservations)
-	if err != nil {
-		return false, nil, err
-	}
-
-	var intervals []ccipdata.CommitStoreInterval
-	for _, obs := range validObservations {
+	var intervals []commit_store.CommitStoreInterval
+	for _, obs := range parsableObservations {
 		intervals = append(intervals, obs.Interval)
 	}
 
@@ -474,87 +537,31 @@ func (r *CommitReportingPlugin) Report(ctx context.Context, epochAndRound types.
 		return false, nil, err
 	}
 
-	latestGasPrice, err := r.getLatestGasPriceUpdate(ctx, now, true)
-	if err != nil {
-		return false, nil, err
-	}
-
-	latestTokenPrices, err := r.getLatestTokenPriceUpdates(ctx, now, true)
-	if err != nil {
-		return false, nil, err
-	}
-
-	tokenPrices, gasPrices, err := r.calculatePriceUpdates(validObservations, latestGasPrice, latestTokenPrices)
-	if err != nil {
-		return false, nil, err
-	}
+	priceUpdates := calculatePriceUpdates(r.config.sourceChainSelector, parsableObservations, r.F)
 	// If there are no fee updates and the interval is zero there is no report to produce.
-	if len(tokenPrices) == 0 && len(gasPrices) == 0 && agreedInterval.Max == 0 {
+	if len(priceUpdates.TokenPriceUpdates) == 0 && priceUpdates.DestChainSelector == 0 && agreedInterval.Min == 0 {
 		lggr.Infow("Empty report, skipping")
 		return false, nil, nil
 	}
 
-	report, err := r.buildReport(ctx, lggr, agreedInterval, gasPrices, tokenPrices)
+	report, err := r.buildReport(ctx, lggr, agreedInterval, priceUpdates)
 	if err != nil {
 		return false, nil, err
 	}
-	encodedReport, err := r.commitStoreReader.EncodeCommitReport(report)
+	encodedReport, err := abihelpers.EncodeCommitReport(report)
 	if err != nil {
 		return false, nil, err
 	}
 	lggr.Infow("Report",
-		"merkleRoot", hex.EncodeToString(report.MerkleRoot[:]),
+		"merkleRoot", report.MerkleRoot,
 		"minSeqNr", report.Interval.Min,
 		"maxSeqNr", report.Interval.Max,
-		"tokenPriceUpdates", report.TokenPrices,
-		"gasPriceUpdates", report.GasPrices,
+		"tokenPriceUpdates", report.PriceUpdates.TokenPriceUpdates,
+		"destChainSelector", report.PriceUpdates.DestChainSelector,
+		"sourceUsdPerUnitGas", report.PriceUpdates.UsdPerUnitGas,
 		"epochAndRound", epochAndRound,
 	)
 	return true, encodedReport, nil
-}
-
-// validateObservations validates the given observations.
-// An observation is rejected if any of its gas price or token price is nil. With current CommitObservation implementation, prices
-// are checked to ensure no nil values before adding to Observation, hence an observation that contains nil values comes from a faulty node.
-func validateObservations(ctx context.Context, lggr logger.Logger, supportedTokensMap map[common.Address]uint8, f int, observations []CommitObservation) (validObs []CommitObservation, err error) {
-	for _, obs := range observations {
-		// If gas price is reported as nil, the observation is faulty, skip the observation.
-		if obs.SourceGasPriceUSD == nil {
-			lggr.Warnw("Skipping observation due to nil SourceGasPriceUSD")
-			continue
-		}
-		// If observed number of token prices does not match number of supported tokens on dest chain, skip the observation.
-		if len(supportedTokensMap) != len(obs.TokenPricesUSD) {
-			lggr.Warnw("Skipping observation due to token count mismatch", "expecting", len(supportedTokensMap), "got", len(obs.TokenPricesUSD))
-			continue
-		}
-		// If any of the observed token prices is reported as nil, or not supported on dest chain, the observation is faulty, skip the observation.
-		// Printing all faulty prices instead of short-circuiting to make log more informative.
-		skipObservation := false
-		for token, price := range obs.TokenPricesUSD {
-			if price == nil {
-				lggr.Warnw("Nil value in observed TokenPricesUSD", "token", token.Hex())
-				skipObservation = true
-			}
-			if _, exists := supportedTokensMap[token]; !exists {
-				lggr.Warnw("Unsupported token in observed TokenPricesUSD", "token", token.Hex())
-				skipObservation = true
-			}
-		}
-		if skipObservation {
-			lggr.Warnw("Skipping observation due to invalid TokenPricesUSD")
-			continue
-		}
-
-		validObs = append(validObs, obs)
-	}
-
-	// We require at least f+1 valid observations. This corresponds to the scenario where f of the 2f+1 are faulty.
-	if len(validObs) <= f {
-		return nil, errors.Errorf("Not enough valid observations to form consensus: #obs=%d, f=%d", len(validObs), f)
-	}
-
-	return validObs, nil
 }
 
 // calculateIntervalConsensus compresses a set of intervals into one interval
@@ -565,7 +572,13 @@ func validateObservations(ctx context.Context, lggr logger.Logger, supportedToke
 // we'll either have f+1 parsed honest values here, 2f+1 parsed values with f adversarial values or somewhere
 // in between.
 // rangeLimit is the maximum range of the interval. If the interval is larger than this, it will be truncated. Zero means no limit.
-func calculateIntervalConsensus(intervals []ccipdata.CommitStoreInterval, f int, rangeLimit uint64) (ccipdata.CommitStoreInterval, error) {
+func calculateIntervalConsensus(intervals []commit_store.CommitStoreInterval, f int, rangeLimit uint64) (commit_store.CommitStoreInterval, error) {
+	// We require at least f+1 parsed values. This corresponds to the scenario where f of the 2f+1 are faulty
+	// in the sense that they are unparseable.
+	if len(intervals) <= f {
+		return commit_store.CommitStoreInterval{}, errors.Errorf("Not enough intervals to form consensus: #obs=%d, f=%d", len(intervals), f)
+	}
+
 	// To understand min/max selection here, we need to consider an adversary that controls f values
 	// and is intentionally trying to stall the protocol or influence the value returned. For simplicity
 	// consider f=1 and n=4 nodes. In that case adversary may try to bias the min or max high/low.
@@ -585,7 +598,7 @@ func calculateIntervalConsensus(intervals []ccipdata.CommitStoreInterval, f int,
 	// The only way a report could have a minSeqNum of 0 is when there are no messages to report
 	// and the report is potentially still valid for gas fee updates.
 	if minSeqNum == 0 {
-		return ccipdata.CommitStoreInterval{Min: 0, Max: 0}, nil
+		return commit_store.CommitStoreInterval{Min: 0, Max: 0}, nil
 	}
 	// Consider a similar example to the sorted_mins one above except where they are maxes.
 	// We choose the more "conservative" sorted_maxes[f] so:
@@ -604,7 +617,7 @@ func calculateIntervalConsensus(intervals []ccipdata.CommitStoreInterval, f int,
 	if maxSeqNum < minSeqNum {
 		// If the consensus report is invalid for onchain acceptance, we do not vote for it as
 		// an early termination step.
-		return ccipdata.CommitStoreInterval{}, errors.New("max seq num smaller than min")
+		return commit_store.CommitStoreInterval{}, errors.New("max seq num smaller than min")
 	}
 
 	// If the range is too large, truncate it.
@@ -612,147 +625,130 @@ func calculateIntervalConsensus(intervals []ccipdata.CommitStoreInterval, f int,
 		maxSeqNum = minSeqNum + rangeLimit - 1
 	}
 
-	return ccipdata.CommitStoreInterval{
+	return commit_store.CommitStoreInterval{
 		Min: minSeqNum,
 		Max: maxSeqNum,
 	}, nil
 }
 
 // Note priceUpdates must be deterministic.
-// The provided latestTokenPrices should not contain nil values.
-func (r *CommitReportingPlugin) calculatePriceUpdates(observations []CommitObservation, latestGasPrice update, latestTokenPrices map[common.Address]update) ([]ccipdata.TokenPrice, []ccipdata.GasPrice, error) {
+func calculatePriceUpdates(destChainSelector uint64, observations []CommitObservation, f int) commit_store.InternalPriceUpdates {
 	priceObservations := make(map[common.Address][]*big.Int)
-	var sourceGasObservations []prices.GasPrice
+	var sourceGasObservations []*big.Int
 
 	for _, obs := range observations {
-		sourceGasObservations = append(sourceGasObservations, obs.SourceGasPriceUSD)
+		if obs.SourceGasPriceUSD != nil {
+			// Add only non-nil source gas price
+			sourceGasObservations = append(sourceGasObservations, obs.SourceGasPriceUSD)
+		}
 		// iterate over any token which price is included in observations
 		for token, price := range obs.TokenPricesUSD {
+			if price == nil {
+				continue
+			}
 			priceObservations[token] = append(priceObservations[token], price)
 		}
 	}
 
-	var tokenPriceUpdates []ccipdata.TokenPrice
+	var priceUpdates []commit_store.InternalTokenPriceUpdate
 	for token, tokenPriceObservations := range priceObservations {
-		medianPrice := ccipcalc.BigIntSortedMiddle(tokenPriceObservations)
-
-		latestTokenPrice, exists := latestTokenPrices[token]
-		if exists {
-			tokenPriceUpdatedRecently := time.Since(latestTokenPrice.timestamp) < r.offchainConfig.TokenPriceHeartBeat
-			tokenPriceNotChanged := !ccipcalc.Deviates(medianPrice, latestTokenPrice.value, int64(r.offchainConfig.TokenPriceDeviationPPB))
-			if tokenPriceUpdatedRecently && tokenPriceNotChanged {
-				r.lggr.Debugw("price was updated recently, skipping the update",
-					"token", token, "newPrice", medianPrice, "existingPrice", latestTokenPrice.value)
-				continue // skip the update if we recently had a price update close to the new value
-			}
+		// If majority report a token price, include it in the update
+		if len(tokenPriceObservations) <= f {
+			continue
 		}
-
-		tokenPriceUpdates = append(tokenPriceUpdates, ccipdata.TokenPrice{
-			Token: token,
-			Value: medianPrice,
+		medianPrice := median(tokenPriceObservations)
+		priceUpdates = append(priceUpdates, commit_store.InternalTokenPriceUpdate{
+			SourceToken: token,
+			UsdPerToken: medianPrice,
 		})
 	}
 
 	// Determinism required.
-	sort.Slice(tokenPriceUpdates, func(i, j int) bool {
-		return bytes.Compare(tokenPriceUpdates[i].Token[:], tokenPriceUpdates[j].Token[:]) == -1
+	sort.Slice(priceUpdates, func(i, j int) bool {
+		return bytes.Compare(priceUpdates[i].SourceToken[:], priceUpdates[j].SourceToken[:]) == -1
 	})
 
-	newGasPrice, err := r.gasPriceEstimator.Median(sourceGasObservations) // Compute the median price
-	if err != nil {
-		return nil, nil, err
-	}
-	destChainSelector := r.sourceChainSelector // Assuming plugin lane is A->B, we write to B the gas price of A
-
-	var gasPrices []ccipdata.GasPrice
-	// Default to updating so that we update if there are no prior updates.
-	shouldUpdate := true
-	if latestGasPrice.value != nil {
-		gasPriceUpdatedRecently := time.Since(latestGasPrice.timestamp) < r.offchainConfig.GasPriceHeartBeat
-		gasPriceDeviated, err := r.gasPriceEstimator.Deviates(newGasPrice, latestGasPrice.value)
-		if err != nil {
-			return nil, nil, err
-		}
-		if gasPriceUpdatedRecently && !gasPriceDeviated {
-			shouldUpdate = false
-		}
-	}
-	if shouldUpdate {
-		// Although onchain interface accepts multi gas updates, we only do 1 gas price per report for now.
-		gasPrices = append(gasPrices, ccipdata.GasPrice{DestChainSelector: destChainSelector, Value: newGasPrice})
+	// Must never be nil
+	usdPerUnitGas := big.NewInt(0)
+	// If majority report a gas price, include it in the update
+	if len(sourceGasObservations) <= f {
+		destChainSelector = 0
+	} else {
+		usdPerUnitGas = median(sourceGasObservations)
 	}
 
-	return tokenPriceUpdates, gasPrices, nil
+	return commit_store.InternalPriceUpdates{
+		TokenPriceUpdates: priceUpdates,
+		// Sending zero is ok, UsdPerUnitGas update is skipped
+		DestChainSelector: destChainSelector,
+		UsdPerUnitGas:     usdPerUnitGas,
+	}
 }
 
 // buildReport assumes there is at least one message in reqs.
-func (r *CommitReportingPlugin) buildReport(ctx context.Context, lggr logger.Logger, interval ccipdata.CommitStoreInterval, gasPrices []ccipdata.GasPrice, tokenPrices []ccipdata.TokenPrice) (ccipdata.CommitStoreReport, error) {
+func (r *CommitReportingPlugin) buildReport(ctx context.Context, lggr logger.Logger, interval commit_store.CommitStoreInterval, priceUpdates commit_store.InternalPriceUpdates) (commit_store.CommitStoreCommitReport, error) {
 	// If no messages are needed only include fee updates
 	if interval.Min == 0 {
-		return ccipdata.CommitStoreReport{
-			TokenPrices: tokenPrices,
-			GasPrices:   gasPrices,
-			MerkleRoot:  [32]byte{},
-			Interval:    interval,
+		return commit_store.CommitStoreCommitReport{
+			PriceUpdates: priceUpdates,
+			MerkleRoot:   [32]byte{},
+			Interval:     interval,
 		}, nil
 	}
 
 	// Logs are guaranteed to be in order of seq num, since these are finalized logs only
 	// and the contract's seq num is auto-incrementing.
-	sendRequests, err := r.onRampReader.GetSendRequestsBetweenSeqNums(
-		ctx,
-		interval.Min,
-		interval.Max,
+	logs, err := r.config.sourceLP.LogsDataWordRange(
+		abihelpers.EventSignatures.SendRequested,
+		r.config.onRampAddress,
+		abihelpers.EventSignatures.SendRequestedSequenceNumberWord,
+		logpoller.EvmWord(interval.Min),
+		logpoller.EvmWord(interval.Max),
 		int(r.offchainConfig.SourceFinalityDepth),
-	)
+		pg.WithParentCtx(ctx))
 	if err != nil {
-		return ccipdata.CommitStoreReport{}, err
+		return commit_store.CommitStoreCommitReport{}, err
 	}
-	if len(sendRequests) == 0 {
-		lggr.Warn("No messages found in interval",
+	leaves, err := leavesFromIntervals(lggr, r.config.getSeqNumFromLog, interval, r.config.leafHasher, logs)
+	if err != nil {
+		return commit_store.CommitStoreCommitReport{}, err
+	}
+
+	if len(leaves) == 0 {
+		lggr.Warn("No leaves found in interval",
 			"minSeqNr", interval.Min,
 			"maxSeqNr", interval.Max)
-		return ccipdata.CommitStoreReport{}, fmt.Errorf("tried building a tree without leaves")
+		return commit_store.CommitStoreCommitReport{}, fmt.Errorf("tried building a tree without leaves")
 	}
 
-	leaves := make([][32]byte, 0, len(sendRequests))
-	var seqNrs []uint64
-	for _, req := range sendRequests {
-		leaves = append(leaves, req.Data.Hash)
-		seqNrs = append(seqNrs, req.Data.SequenceNumber)
-	}
-	if !ccipcalc.ContiguousReqs(lggr, interval.Min, interval.Max, seqNrs) {
-		return ccipdata.CommitStoreReport{}, errors.Errorf("do not have full range [%v, %v] have %v", interval.Min, interval.Max, seqNrs)
-	}
-	tree, err := merklemulti.NewTree(hashlib.NewKeccakCtx(), leaves)
+	tree, err := merklemulti.NewTree(hasher.NewKeccakCtx(), leaves)
 	if err != nil {
-		return ccipdata.CommitStoreReport{}, err
+		return commit_store.CommitStoreCommitReport{}, err
 	}
 
-	return ccipdata.CommitStoreReport{
-		GasPrices:   gasPrices,
-		TokenPrices: tokenPrices,
-		MerkleRoot:  tree.Root(),
-		Interval:    interval,
+	return commit_store.CommitStoreCommitReport{
+		PriceUpdates: priceUpdates,
+		MerkleRoot:   tree.Root(),
+		Interval:     interval,
 	}, nil
 }
 
 func (r *CommitReportingPlugin) ShouldAcceptFinalizedReport(ctx context.Context, reportTimestamp types.ReportTimestamp, report types.Report) (bool, error) {
-	parsedReport, err := r.commitStoreReader.DecodeCommitReport(report)
+	parsedReport, err := abihelpers.DecodeCommitReport(report)
 	if err != nil {
 		return false, err
 	}
-
 	lggr := r.lggr.Named("CommitShouldAcceptFinalizedReport").With(
 		"merkleRoot", parsedReport.MerkleRoot,
 		"minSeqNum", parsedReport.Interval.Min,
 		"maxSeqNum", parsedReport.Interval.Max,
-		"gasPriceUpdates", parsedReport.GasPrices,
-		"tokenPriceUpdates", parsedReport.TokenPrices,
+		"destChainSelector", parsedReport.PriceUpdates.DestChainSelector,
+		"usdPerUnitGas", parsedReport.PriceUpdates.UsdPerUnitGas,
+		"tokenPriceUpdates", parsedReport.PriceUpdates.TokenPriceUpdates,
 		"reportTimestamp", reportTimestamp,
 	)
 	// Empty report, should not be put on chain
-	if parsedReport.MerkleRoot == [32]byte{} && len(parsedReport.GasPrices) == 0 && len(parsedReport.TokenPrices) == 0 {
+	if parsedReport.MerkleRoot == [32]byte{} && parsedReport.PriceUpdates.DestChainSelector == 0 && len(parsedReport.PriceUpdates.TokenPriceUpdates) == 0 {
 		lggr.Warn("Empty report, should not be put on chain")
 		return false, nil
 	}
@@ -762,7 +758,7 @@ func (r *CommitReportingPlugin) ShouldAcceptFinalizedReport(ctx context.Context,
 		return false, nil
 	}
 
-	epochAndRound := ccipcalc.MergeEpochAndRound(reportTimestamp.Epoch, reportTimestamp.Round)
+	epochAndRound := mergeEpochAndRound(reportTimestamp.Epoch, reportTimestamp.Round)
 	if err := r.inflightReports.add(lggr, parsedReport, epochAndRound); err != nil {
 		return false, err
 	}
@@ -773,7 +769,7 @@ func (r *CommitReportingPlugin) ShouldAcceptFinalizedReport(ctx context.Context,
 // ShouldTransmitAcceptedReport checks if the report is stale, if it is it should not be transmitted.
 func (r *CommitReportingPlugin) ShouldTransmitAcceptedReport(ctx context.Context, reportTimestamp types.ReportTimestamp, report types.Report) (bool, error) {
 	lggr := r.lggr.Named("CommitShouldTransmitAcceptedReport")
-	parsedReport, err := r.commitStoreReader.DecodeCommitReport(report)
+	parsedReport, err := abihelpers.DecodeCommitReport(report)
 	if err != nil {
 		return false, err
 	}
@@ -801,46 +797,41 @@ func (r *CommitReportingPlugin) ShouldTransmitAcceptedReport(ctx context.Context
 // If there is no merkle root but there is a gas update, only this gas update is used for staleness checks.
 // If only price updates are included, the price updates are used to check for staleness
 // If nothing is included the report is always considered stale.
-func (r *CommitReportingPlugin) isStaleReport(ctx context.Context, lggr logger.Logger, report ccipdata.CommitStoreReport, checkInflight bool, reportTimestamp types.ReportTimestamp) bool {
+func (r *CommitReportingPlugin) isStaleReport(ctx context.Context, lggr logger.Logger, report commit_store.CommitStoreCommitReport, checkInflight bool, reportTimestamp types.ReportTimestamp) bool {
 	// If there is a merkle root, ignore all other staleness checks and only check for sequence number staleness
 	if report.MerkleRoot != [32]byte{} {
 		return r.isStaleMerkleRoot(ctx, lggr, report.Interval, checkInflight)
 	}
 
-	hasGasPriceUpdate := len(report.GasPrices) > 0
-	hasTokenPriceUpdates := len(report.TokenPrices) > 0
+	hasGasPriceUpdate := report.PriceUpdates.DestChainSelector != 0
+	hasTokenPriceUpdates := len(report.PriceUpdates.TokenPriceUpdates) > 0
 
 	// If there is no merkle root, no gas price update and no token price update
 	// we don't want to write anything on-chain, so we consider this report stale.
 	if !hasGasPriceUpdate && !hasTokenPriceUpdates {
 		return true
 	}
-	// Commit plugin currently only supports 1 gas price per report. If report contains more than 1, reject the report.
-	if len(report.GasPrices) > 1 {
-		lggr.Errorw("Report is stale because it contains more than 1 gas price update", "GasPriceUpdates", report.GasPrices)
-		return true
-	}
 
 	// We consider a price update as stale when, there isn't an update or there is an update that is stale.
-	gasPriceStale := !hasGasPriceUpdate || r.isStaleGasPrice(ctx, lggr, report.GasPrices[0], checkInflight)
-	tokenPricesStale := !hasTokenPriceUpdates || r.isStaleTokenPrices(ctx, lggr, report.TokenPrices, checkInflight)
+	gasPriceStale := !hasGasPriceUpdate || r.isStaleGasPrice(ctx, lggr, report.PriceUpdates, checkInflight)
+	tokenPricesStale := !hasTokenPriceUpdates || r.isStaleTokenPrices(ctx, lggr, report.PriceUpdates.TokenPriceUpdates, checkInflight)
 
 	if gasPriceStale && tokenPricesStale {
 		return true
 	}
 
 	// If report only has price update, check if its epoch and round lags behind the latest onchain
-	lastPriceEpochAndRound, err := r.commitStoreReader.GetLatestPriceEpochAndRound(ctx)
+	lastPriceEpochAndRound, err := r.config.commitStore.GetLatestPriceEpochAndRound(&bind.CallOpts{Context: ctx})
 	if err != nil {
 		// Assume it's a transient issue getting the last report and try again on the next round
 		return true
 	}
 
-	thisEpochAndRound := ccipcalc.MergeEpochAndRound(reportTimestamp.Epoch, reportTimestamp.Round)
+	thisEpochAndRound := mergeEpochAndRound(reportTimestamp.Epoch, reportTimestamp.Round)
 	return lastPriceEpochAndRound >= thisEpochAndRound
 }
 
-func (r *CommitReportingPlugin) isStaleMerkleRoot(ctx context.Context, lggr logger.Logger, reportInterval ccipdata.CommitStoreInterval, checkInflight bool) bool {
+func (r *CommitReportingPlugin) isStaleMerkleRoot(ctx context.Context, lggr logger.Logger, reportInterval commit_store.CommitStoreInterval, checkInflight bool) bool {
 	nextInflightMin, nextOnChainMin, err := r.nextMinSeqNum(ctx, lggr)
 	if err != nil {
 		// Assume it's a transient issue getting the last report and try again on the next round
@@ -848,7 +839,7 @@ func (r *CommitReportingPlugin) isStaleMerkleRoot(ctx context.Context, lggr logg
 	}
 
 	if checkInflight && nextInflightMin != reportInterval.Min {
-		// There are sequence numbers missing between the commitStoreReader/inflight txs and the proposed report.
+		// There are sequence numbers missing between the commitStore/inflight txs and the proposed report.
 		// The report will fail onchain unless the inflight cache is in an incorrect state. A state like this
 		// could happen for various reasons, e.g. a reboot of the node emptying the caches, and should be self-healing.
 		// We do not submit a tx and wait for the protocol to self-heal by updating the caches or invalidating
@@ -867,33 +858,24 @@ func (r *CommitReportingPlugin) isStaleMerkleRoot(ctx context.Context, lggr logg
 	return false
 }
 
-func (r *CommitReportingPlugin) isStaleGasPrice(ctx context.Context, lggr logger.Logger, gasPrice ccipdata.GasPrice, checkInflight bool) bool {
-	latestGasPrice, err := r.getLatestGasPriceUpdate(ctx, time.Now(), checkInflight)
+func (r *CommitReportingPlugin) isStaleGasPrice(ctx context.Context, lggr logger.Logger, priceUpdates commit_store.InternalPriceUpdates, checkInflight bool) bool {
+	gasPriceUpdate, err := r.getLatestGasPriceUpdate(ctx, time.Now(), checkInflight)
 	if err != nil {
-		lggr.Errorw("Report is stale because getLatestGasPriceUpdate failed", "err", err)
 		return true
 	}
 
-	if latestGasPrice.value != nil {
-		gasPriceDeviated, err := r.gasPriceEstimator.Deviates(gasPrice.Value, latestGasPrice.value)
-		if err != nil {
-			lggr.Errorw("Report is stale because deviation check failed", "err", err)
-			return true
-		}
-
-		if !gasPriceDeviated {
-			lggr.Infow("Report is stale because of gas price",
-				"latestGasPriceUpdate", latestGasPrice.value,
-				"currentUsdPerUnitGas", gasPrice.Value,
-				"destChainSelector", gasPrice.DestChainSelector)
-			return true
-		}
+	if gasPriceUpdate.value != nil && !deviates(priceUpdates.UsdPerUnitGas, gasPriceUpdate.value, int64(r.offchainConfig.FeeUpdateDeviationPPB)) {
+		lggr.Infow("Report is stale because of gas price",
+			"latestGasPriceUpdate", gasPriceUpdate.value,
+			"usdPerUnitGas", priceUpdates.UsdPerUnitGas,
+			"destChainSelector", priceUpdates.DestChainSelector)
+		return true
 	}
 
 	return false
 }
 
-func (r *CommitReportingPlugin) isStaleTokenPrices(ctx context.Context, lggr logger.Logger, priceUpdates []ccipdata.TokenPrice, checkInflight bool) bool {
+func (r *CommitReportingPlugin) isStaleTokenPrices(ctx context.Context, lggr logger.Logger, priceUpdates []commit_store.InternalTokenPriceUpdate, checkInflight bool) bool {
 	// getting the last price updates without including inflight is like querying
 	// current prices onchain, but uses logpoller's data to save on the RPC requests
 	latestTokenPriceUpdates, err := r.getLatestTokenPriceUpdates(ctx, time.Now(), checkInflight)
@@ -902,14 +884,14 @@ func (r *CommitReportingPlugin) isStaleTokenPrices(ctx context.Context, lggr log
 	}
 
 	for _, tokenUpdate := range priceUpdates {
-		latestUpdate, ok := latestTokenPriceUpdates[tokenUpdate.Token]
-		priceEqual := ok && !ccipcalc.Deviates(tokenUpdate.Value, latestUpdate.value, int64(r.offchainConfig.TokenPriceDeviationPPB))
+		latestUpdate, ok := latestTokenPriceUpdates[tokenUpdate.SourceToken]
+		priceEqual := ok && !deviates(tokenUpdate.UsdPerToken, latestUpdate.value, int64(r.offchainConfig.FeeUpdateDeviationPPB))
 
 		if !priceEqual {
-			lggr.Infow("Found non-stale token price", "token", tokenUpdate.Token, "usdPerToken", tokenUpdate.Value, "latestUpdate", latestUpdate.value)
+			lggr.Infow("Found non-stale token price", "token", tokenUpdate.SourceToken, "usdPerToken", tokenUpdate.UsdPerToken, "latestUpdate", latestUpdate.value)
 			return false
 		}
-		lggr.Infow("Token price is stale", "latestTokenPrice", latestUpdate.value, "usdPerToken", tokenUpdate.Value, "token", tokenUpdate.Token)
+		lggr.Infow("Token price is stale", "latestTokenPrice", latestUpdate.value, "usdPerToken", tokenUpdate.UsdPerToken, "token", tokenUpdate.SourceToken)
 	}
 
 	lggr.Infow("All token prices are stale")

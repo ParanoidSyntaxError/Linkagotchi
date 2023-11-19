@@ -26,6 +26,7 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/ethkey"
 	"github.com/smartcontractkit/chainlink/v2/core/services/metatx"
+	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/abihelpers"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/testhelpers"
 	integrationtesthelpers "github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/testhelpers/integration"
 )
@@ -56,16 +57,15 @@ func TestMetaERC20SameChain(t *testing.T) {
 	totalTokens := big.NewInt(1e9)
 	// CCIP router address is not needed because the test is for same-chain transfer
 	tokenAddress, token := setUpBankERC20(t, contractOwner, chain, forwarderAddress, common.HexToAddress("0x1"), ccipFeeProvider.From, totalTokens, chainID)
-	// amount to transfer
+
 	amount := assets.Ether(1).ToInt()
 
-	// fund BankERC20 contract with native ETH. Test setup may use a low Eth price, important to send enough.
-	ccipFeeBudget := assets.Ether(3).ToInt()
-	transferNative(t, contractOwner, tokenAddress, 50_000, ccipFeeBudget, chain)
+	// fund BankERC20 contract with native ETH
+	transferNative(t, contractOwner, tokenAddress, 50_000, amount, chain)
 
 	sourceTokenEthBal, err := chain.BalanceAt(testutils.Context(t), tokenAddress, nil)
 	require.NoError(t, err)
-	require.Equal(t, ccipFeeBudget, sourceTokenEthBal)
+	require.Equal(t, amount, sourceTokenEthBal)
 
 	t.Run("single same-chain meta transfer", func(t *testing.T) {
 		// transfer BankERC20 from contract owner to holder1
@@ -95,7 +95,7 @@ func TestMetaERC20SameChain(t *testing.T) {
 			ValidUntilTime: deadline,
 		}
 
-		transferNative(t, contractOwner, relay.From, 21_000, ccipFeeBudget, chain)
+		transferNative(t, contractOwner, relay.From, 21_000, amount, chain)
 
 		holder1BalanceBefore, err := token.BalanceOf(nil, holder1.From)
 		require.NoError(t, err)
@@ -120,7 +120,7 @@ func TestMetaERC20SameChain(t *testing.T) {
 }
 
 func TestMetaERC20CrossChain(t *testing.T) {
-	ccipContracts := integrationtesthelpers.SetupCCIPIntegrationTH(t, testhelpers.SourceChainID, testhelpers.SourceChainSelector, testhelpers.DestChainID, testhelpers.DestChainSelector)
+	ccipContracts := integrationtesthelpers.SetupCCIPIntegrationTH(t, testhelpers.SourceChainID, testhelpers.DestChainID)
 
 	// holder1Key sends tokens to holder2
 	holder1Key, holder1 := generateKeyAndTransactor(t, ccipContracts.Source.Chain.Blockchain().Config().ChainID.Uint64())
@@ -140,8 +140,7 @@ func TestMetaERC20CrossChain(t *testing.T) {
 	require.NoError(t, err)
 
 	amount := assets.Ether(1).ToInt()
-	ccipFeeBudget := assets.Ether(3).ToInt()
-	transferNative(t, ccipContracts.Source.User, sourceTokenAddress, 50_000, ccipFeeBudget, ccipContracts.Source.Chain)
+	transferNative(t, ccipContracts.Source.User, sourceTokenAddress, 50_000, amount, ccipContracts.Source.Chain)
 
 	linkUSD := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, err := w.Write([]byte(`{"UsdPerLink": "8000000000000000000"}`))
@@ -191,7 +190,7 @@ merge [type=merge left="{}" right="{\\\"%s\\\":$(link_parse), \\\"%s\\\":$(eth_p
 
 		deadline := big.NewInt(int64(ccipContracts.Source.Chain.Blockchain().CurrentHeader().Time + uint64(time.Hour)))
 
-		calldata, calldataHash, err := metatx.GenerateMetaTransferCalldata(holder2.From, amount, ccipContracts.Dest.ChainSelector)
+		calldata, calldataHash, err := metatx.GenerateMetaTransferCalldata(holder2.From, amount, ccipContracts.Dest.ChainID)
 		require.NoError(t, err)
 
 		signature, domainSeparatorHash, typeHash, forwarderNonce, err := metatx.SignMetaTransfer(
@@ -214,7 +213,7 @@ merge [type=merge left="{}" right="{\\\"%s\\\":$(link_parse), \\\"%s\\\":$(eth_p
 			ValidUntilTime: deadline,
 		}
 
-		transferNative(t, ccipContracts.Source.User, relay.From, 21_000, ccipFeeBudget, ccipContracts.Source.Chain)
+		transferNative(t, ccipContracts.Source.User, relay.From, 21_000, amount, ccipContracts.Source.Chain)
 
 		// send meta transaction to forwarder
 		_, err = forwarder.Execute(relay, forwardRequest, domainSeparatorHash, typeHash, []byte{}, signature)
@@ -234,7 +233,7 @@ merge [type=merge left="{}" right="{\\\"%s\\\":$(link_parse), \\\"%s\\\":$(eth_p
 
 		executionLogs := ccipContracts.AllNodesHaveExecutedSeqNums(t, geCurrentSeqNum, geCurrentSeqNum)
 		assert.Len(t, executionLogs, 1)
-		ccipContracts.AssertExecState(t, executionLogs[0], testhelpers.ExecutionStateSuccess)
+		ccipContracts.AssertExecState(t, executionLogs[0], abihelpers.ExecutionStateSuccess)
 
 		// source token is locked in the token pool
 		lockedTokenBal, err := sourceToken.BalanceOf(nil, sourcePoolAddress)

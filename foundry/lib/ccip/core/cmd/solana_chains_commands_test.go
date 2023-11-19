@@ -16,11 +16,8 @@ func TestShell_IndexSolanaChains(t *testing.T) {
 	t.Parallel()
 
 	id := solanatest.RandomChainID()
-	cfg := solana.SolanaConfig{
-		ChainID: &id,
-		Enabled: ptr(true),
-	}
-	app := solanaStartNewApplication(t, &cfg)
+	chain := solana.SolanaConfig{ChainID: &id}
+	app := solanaStartNewApplication(t, &chain)
 	client, r := app.NewShellAndRenderer()
 
 	require.Nil(t, cmd.SolanaChainClient(client).IndexChains(cltest.EmptyCLIContext()))

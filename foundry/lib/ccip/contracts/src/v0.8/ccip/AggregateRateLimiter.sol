@@ -8,15 +8,11 @@ import {Client} from "./libraries/Client.sol";
 import {RateLimiter} from "./libraries/RateLimiter.sol";
 import {USDPriceWith18Decimals} from "./libraries/USDPriceWith18Decimals.sol";
 
-/// @notice The aggregate rate limiter is a wrapper of the token bucket rate limiter
-/// which permits rate limiting based on the aggregate value of a group of
-/// token transfers, using a price registry to convert to a numeraire asset (e.g. USD).
 contract AggregateRateLimiter is OwnerIsCreator {
   using RateLimiter for RateLimiter.TokenBucket;
-  using USDPriceWith18Decimals for uint224;
+  using USDPriceWith18Decimals for uint192;
 
   error PriceNotFoundForToken(address token);
-
   event AdminSet(address newAdmin);
 
   // The address of the token limit admin that has the same permissions as the owner.
@@ -46,7 +42,7 @@ contract AggregateRateLimiter is OwnerIsCreator {
     for (uint256 i = 0; i < numberOfTokens; ++i) {
       // not fetching validated price, as price staleness is not important for value-based rate limiting
       // we only need to verify price is not 0
-      uint224 pricePerToken = priceRegistry.getTokenPrice(tokenAmounts[i].token).value;
+      uint192 pricePerToken = priceRegistry.getTokenPrice(tokenAmounts[i].token).value;
       if (pricePerToken == 0) revert PriceNotFoundForToken(tokenAmounts[i].token);
       value += pricePerToken._calcUSDValueFromTokenAmount(tokenAmounts[i].amount);
     }
@@ -68,7 +64,7 @@ contract AggregateRateLimiter is OwnerIsCreator {
   }
 
   // ================================================================
-  // │                           Access                             │
+  // |                           Access                             |
   // ================================================================
 
   /// @notice Gets the token limit admin address.

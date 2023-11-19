@@ -9,35 +9,39 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/services"
 )
 
-// NewStartedServer returns a started Server.
+// StartServer returns a started Server.
 // The caller is responsible for calling Server.Stop().
-func NewStartedServer(loggerName string) (*Server, error) {
-	s, err := newServer(loggerName)
-	if err != nil {
-		return nil, err
-	}
-	err = s.start()
-	if err != nil {
-		return nil, err
+func StartServer(loggerName string) *Server {
+	s := Server{
+		// default prometheus.Registerer
+		GRPCOpts: loop.SetupTelemetry(nil),
 	}
 
-	return s, nil
-}
-
-// MustNewStartedServer returns a new started Server like NewStartedServer, but logs and exits in the event of error.
-// The caller is responsible for calling Server.Stop().
-func MustNewStartedServer(loggerName string) *Server {
-	s, err := newServer(loggerName)
+	lggr, err := loop.NewLogger()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to start server: %s\n", err)
+		fmt.Fprintf(os.Stderr, "Failed to create logger: %s\n", err)
 		os.Exit(1)
 	}
-	err = s.start()
+	lggr = logger.Named(lggr, loggerName)
+	s.Logger = logger.Sugared(lggr)
+
+	envCfg, err := GetEnvConfig()
 	if err != nil {
-		s.Logger.Fatalf("Failed to start server: %s", err)
+		lggr.Fatalf("Failed to get environment configuration: %s\n", err)
+	}
+	s.PromServer = NewPromServer(envCfg.PrometheusPort(), lggr)
+	err = s.PromServer.Start()
+	if err != nil {
+		lggr.Fatalf("Unrecoverable error starting prometheus server: %s", err)
 	}
 
-	return s
+	s.Checker = services.NewChecker()
+	err = s.Checker.Start()
+	if err != nil {
+		lggr.Fatalf("Failed to start health checker: %v", err)
+	}
+
+	return &s
 }
 
 // Server holds common plugin server fields.
@@ -48,52 +52,18 @@ type Server struct {
 	services.Checker
 }
 
-func newServer(loggerName string) (*Server, error) {
-	s := &Server{
-		// default prometheus.Registerer
-		GRPCOpts: loop.SetupTelemetry(nil),
-	}
-
-	lggr, err := loop.NewLogger()
-	if err != nil {
-		return nil, fmt.Errorf("error creating logger: %s", err)
-	}
-	lggr = logger.Named(lggr, loggerName)
-	s.Logger = logger.Sugared(lggr)
-	return s, nil
-}
-
-func (s *Server) start() error {
-	envCfg, err := GetEnvConfig()
-	if err != nil {
-		return fmt.Errorf("error getting environment configuration: %w", err)
-	}
-	s.PromServer = NewPromServer(envCfg.PrometheusPort(), s.Logger)
-	err = s.PromServer.Start()
-	if err != nil {
-		return fmt.Errorf("error starting prometheus server: %w", err)
-	}
-
-	s.Checker = services.NewChecker()
-	err = s.Checker.Start()
-	if err != nil {
-		return fmt.Errorf("error starting health checker: %w", err)
-	}
-
-	return nil
-}
-
 // MustRegister registers the Checkable with services.Checker, or exits upon failure.
-func (s *Server) MustRegister(c services.Checkable) {
-	if err := s.Register(c); err != nil {
-		s.Logger.Fatalf("Failed to register %s with health checker: %v", c.Name(), err)
+func (s *Server) MustRegister(name string, c services.Checkable) {
+	err := s.Register(name, c)
+	if err != nil {
+		s.Logger.Fatalf("Failed to register %s with health checker: %v", name, err)
 	}
 }
 
 // Stop closes resources and flushes logs.
 func (s *Server) Stop() {
 	s.Logger.ErrorIfFn(s.Checker.Close, "Failed to close health checker")
-	s.Logger.ErrorIfFn(s.PromServer.Close, "Failed to close prometheus server")
+	s.Logger.ErrorIfFn(s.PromServer.Close, "error closing prometheus server")
 	if err := s.Logger.Sync(); err != nil {
 		fmt.Println("Failed to sync logger:", err)
 	}

@@ -23,7 +23,6 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/shopspring/decimal"
-
 	types2 "github.com/smartcontractkit/libocr/offchainreporting2plus/types"
 
 	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/link_token_interface"
@@ -111,7 +110,6 @@ func SetupEnv(overrideNonce bool) Environment {
 	// Explicitly set gas price to ensure non-eip 1559
 	gp, err := ec.SuggestGasPrice(context.Background())
 	PanicErr(err)
-	fmt.Println("Suggested Gas Price:", gp, "wei")
 	owner.GasPrice = gp
 	gasLimit, set := os.LookupEnv("GAS_LIMIT")
 	if set {
@@ -130,9 +128,9 @@ func SetupEnv(overrideNonce bool) Environment {
 		PanicErr(err)
 
 		owner.Nonce = big.NewInt(int64(nonce))
+		owner.GasPrice = gp.Mul(gp, big.NewInt(2))
 	}
-	owner.GasPrice = gp.Mul(gp, big.NewInt(2))
-	fmt.Println("Modified Gas Price that will be set:", owner.GasPrice, "wei")
+
 	// the execution environment for the scripts
 	return Environment{
 		Owner:   owner,
@@ -215,11 +213,6 @@ func explorerLinkPrefix(chainID int64) (prefix string) {
 		prefix = "https://explorer.harmony.one"
 	case 1666700000, 1666700001, 1666700002, 1666700003: // Harmony testnet
 		prefix = "https://explorer.testnet.harmony.one"
-
-	case 84531:
-		prefix = "https://goerli.basescan.org"
-	case 8453:
-		prefix = "https://basescan.org"
 
 	default: // Unknown chain, return prefix as-is
 		prefix = ""
@@ -342,52 +335,43 @@ func ParseHexSlice(arg string) (ret [][]byte) {
 }
 
 func FundNodes(e Environment, transmitters []string, fundingAmount *big.Int) {
-	for _, transmitter := range transmitters {
-		FundNode(e, transmitter, fundingAmount)
-	}
-}
-
-func FundNode(e Environment, address string, fundingAmount *big.Int) {
 	block, err := e.Ec.BlockNumber(context.Background())
 	PanicErr(err)
 
 	nonce, err := e.Ec.NonceAt(context.Background(), e.Owner.From, big.NewInt(int64(block)))
 	PanicErr(err)
-	// Special case for Arbitrum since gas estimation there is different.
 
-	var gasLimit uint64
-	if IsArbitrumChainID(e.ChainID) {
-		to := common.HexToAddress(address)
-		estimated, err := e.Ec.EstimateGas(context.Background(), ethereum.CallMsg{
-			From:  e.Owner.From,
-			To:    &to,
-			Value: fundingAmount,
-		})
+	for i := 0; i < len(transmitters); i++ {
+		// Special case for Arbitrum since gas estimation there is different.
+		var gasLimit uint64
+		if IsArbitrumChainID(e.ChainID) {
+			to := common.HexToAddress(transmitters[i])
+			estimated, err := e.Ec.EstimateGas(context.Background(), ethereum.CallMsg{
+				From:  e.Owner.From,
+				To:    &to,
+				Value: fundingAmount,
+			})
+			PanicErr(err)
+			gasLimit = estimated
+		} else {
+			gasLimit = uint64(21_000)
+		}
+
+		tx := types.NewTransaction(
+			nonce+uint64(i),
+			common.HexToAddress(transmitters[i]),
+			fundingAmount,
+			gasLimit,
+			e.Owner.GasPrice,
+			nil,
+		)
+		signedTx, err := e.Owner.Signer(e.Owner.From, tx)
 		PanicErr(err)
-		gasLimit = estimated
-	} else {
-		gasLimit = uint64(21_000)
+		err = e.Ec.SendTransaction(context.Background(), signedTx)
+		PanicErr(err)
+
+		fmt.Printf("Sending to %s: %s\n", transmitters[i], ExplorerLink(e.ChainID, signedTx.Hash()))
 	}
-	toAddress := common.HexToAddress(address)
-
-	tx := types.NewTx(
-		&types.LegacyTx{
-			Nonce:    nonce,
-			GasPrice: e.Owner.GasPrice,
-			Gas:      gasLimit,
-			To:       &toAddress,
-			Value:    fundingAmount,
-			Data:     nil,
-		})
-
-	signedTx, err := e.Owner.Signer(e.Owner.From, tx)
-	PanicErr(err)
-	err = e.Ec.SendTransaction(context.Background(), signedTx)
-	PanicErr(err)
-	fmt.Printf("Sending to %s: %s\n", address, ExplorerLink(e.ChainID, signedTx.Hash()))
-	PanicErr(err)
-	_, err = bind.WaitMined(context.Background(), e.Ec, signedTx)
-	PanicErr(err)
 }
 
 // binarySearch finds the highest value within the range bottom-top at which the test function is
@@ -417,17 +401,12 @@ func BinarySearch(top, bottom *big.Int, test func(amount *big.Int) bool) *big.In
 	return bottom
 }
 
-// GetRlpHeaders gets RLP encoded headers of a list of block numbers
+// Get RLP encoded headers of a list of block numbers
 // Makes RPC network call eth_getBlockByNumber to blockchain RPC node
 // to fetch header info
-func GetRlpHeaders(env Environment, blockNumbers []*big.Int, getParentBlocks bool) (headers [][]byte, hashes []string, err error) {
+func GetRlpHeaders(env Environment, blockNumbers []*big.Int) (headers [][]byte, hashes []string, err error) {
 
 	hashes = make([]string, 0)
-
-	var offset *big.Int = big.NewInt(0)
-	if getParentBlocks {
-		offset = big.NewInt(1)
-	}
 
 	headers = [][]byte{}
 	var rlpHeader []byte
@@ -438,7 +417,7 @@ func GetRlpHeaders(env Environment, blockNumbers []*big.Int, getParentBlocks boo
 			// Get child block since it's the one that has the parent hash in its header.
 			h, err := env.AvaxEc.HeaderByNumber(
 				context.Background(),
-				new(big.Int).Set(blockNum).Add(blockNum, offset),
+				new(big.Int).Set(blockNum).Add(blockNum, big.NewInt(1)),
 			)
 			if err != nil {
 				return nil, hashes, fmt.Errorf("failed to get header: %+v", err)
@@ -457,12 +436,12 @@ func GetRlpHeaders(env Environment, blockNumbers []*big.Int, getParentBlocks boo
 			//bh := crypto.Keccak256Hash(rlpHeader)
 			//fmt.Println("Calculated BH:", bh.String(),
 			//	"fetched BH:", h.Hash(),
-			//	"block number:", new(big.Int).Set(blockNum).Add(blockNum, offset).String())
+			//	"block number:", new(big.Int).Set(blockNum).Add(blockNum, big.NewInt(1)).String())
 
 		} else if IsPolygonEdgeNetwork(env.ChainID) {
 
 			// Get child block since it's the one that has the parent hash in its header.
-			nextBlockNum := new(big.Int).Set(blockNum).Add(blockNum, offset)
+			nextBlockNum := new(big.Int).Set(blockNum).Add(blockNum, big.NewInt(1))
 			var hash string
 			rlpHeader, hash, err = GetPolygonEdgeRLPHeader(env.Jc, nextBlockNum)
 			if err != nil {
@@ -475,7 +454,7 @@ func GetRlpHeaders(env Environment, blockNumbers []*big.Int, getParentBlocks boo
 			// Get child block since it's the one that has the parent hash in its header.
 			h, err := env.Ec.HeaderByNumber(
 				context.Background(),
-				new(big.Int).Set(blockNum).Add(blockNum, offset),
+				new(big.Int).Set(blockNum).Add(blockNum, big.NewInt(1)),
 			)
 			if err != nil {
 				return nil, hashes, fmt.Errorf("failed to get header: %+v", err)
@@ -513,7 +492,7 @@ func CalculateLatestBlockHeader(env Environment, blockNumberInput int) (err erro
 	blockNumber = blockNumber - 1
 
 	blockNumberBigInts := []*big.Int{big.NewInt(int64(blockNumber))}
-	headers, hashes, err := GetRlpHeaders(env, blockNumberBigInts, true)
+	headers, hashes, err := GetRlpHeaders(env, blockNumberBigInts)
 	if err != nil {
 		fmt.Println(err)
 		return err

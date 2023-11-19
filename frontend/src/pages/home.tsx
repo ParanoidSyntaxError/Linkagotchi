@@ -1,9 +1,15 @@
+import React, {CSSProperties} from 'react';
 import Title from "../components/title";
 
-function Home() {
+function Home() {  
+    const titleStyle: CSSProperties = {
+    };
+
     return (
         <div>
-            {Title()}
+            <div style={titleStyle}>
+                {Title()}   
+            </div>
         </div>
     );
 }

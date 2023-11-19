@@ -10,14 +10,13 @@ import (
 
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/abihelpers"
 	ccipconfig "github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/config"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/internal/ccipdata"
 	"github.com/smartcontractkit/chainlink/v2/core/store/models"
 )
 
-var PermissionLessExecutionThresholdSeconds = uint32(FirstBlockAge.Seconds())
+const PermissionLessExecutionThresholdSeconds = 20 * 60
 
 func (c *CCIPContracts) CreateDefaultCommitOnchainConfig(t *testing.T) []byte {
-	config, err := abihelpers.EncodeAbiStruct(ccipdata.CommitOnchainConfig{
+	config, err := abihelpers.EncodeAbiStruct(ccipconfig.CommitOnchainConfig{
 		PriceRegistry: c.Dest.PriceRegistry.Address(),
 	})
 	require.NoError(t, err)
@@ -29,29 +28,25 @@ func (c *CCIPContracts) CreateDefaultCommitOffchainConfig(t *testing.T) []byte {
 }
 
 func (c *CCIPContracts) createCommitOffchainConfig(t *testing.T, feeUpdateHearBeat time.Duration, inflightCacheExpiry time.Duration) []byte {
-	config, err := ccipconfig.EncodeOffchainConfig(ccipdata.CommitOffchainConfigV1_2_0{
-		SourceFinalityDepth:      1,
-		DestFinalityDepth:        1,
-		GasPriceHeartBeat:        models.MustMakeDuration(feeUpdateHearBeat),
-		DAGasPriceDeviationPPB:   1,
-		ExecGasPriceDeviationPPB: 1,
-		TokenPriceHeartBeat:      models.MustMakeDuration(feeUpdateHearBeat),
-		TokenPriceDeviationPPB:   1,
-		MaxGasPrice:              200e9,
-		InflightCacheExpiry:      models.MustMakeDuration(inflightCacheExpiry),
+	config, err := ccipconfig.EncodeOffchainConfig(ccipconfig.CommitOffchainConfig{
+		SourceFinalityDepth:   1,
+		DestFinalityDepth:     1,
+		FeeUpdateHeartBeat:    models.MustMakeDuration(feeUpdateHearBeat),
+		FeeUpdateDeviationPPB: 1,
+		MaxGasPrice:           200e9,
+		InflightCacheExpiry:   models.MustMakeDuration(inflightCacheExpiry),
 	})
 	require.NoError(t, err)
 	return config
 }
 
 func (c *CCIPContracts) CreateDefaultExecOnchainConfig(t *testing.T) []byte {
-	config, err := abihelpers.EncodeAbiStruct(ccipdata.ExecOnchainConfigV1_2_0{
+	config, err := abihelpers.EncodeAbiStruct(ccipconfig.ExecOnchainConfig{
 		PermissionLessExecutionThresholdSeconds: PermissionLessExecutionThresholdSeconds,
 		Router:                                  c.Dest.Router.Address(),
 		PriceRegistry:                           c.Dest.PriceRegistry.Address(),
-		MaxDataBytes:                            1e5,
-		MaxNumberOfTokensPerMsg:                 5,
-		MaxPoolReleaseOrMintGas:                 200_000,
+		MaxDataSize:                             1e5,
+		MaxTokensLength:                         5,
 	})
 	require.NoError(t, err)
 	return config
@@ -62,7 +57,7 @@ func (c *CCIPContracts) CreateDefaultExecOffchainConfig(t *testing.T) []byte {
 }
 
 func (c *CCIPContracts) createExecOffchainConfig(t *testing.T, inflightCacheExpiry time.Duration, rootSnoozeTime time.Duration) []byte {
-	config, err := ccipconfig.EncodeOffchainConfig(ccipdata.ExecOffchainConfig{
+	config, err := ccipconfig.EncodeOffchainConfig(ccipconfig.ExecOffchainConfig{
 		SourceFinalityDepth:         1,
 		DestOptimisticConfirmations: 1,
 		DestFinalityDepth:           1,

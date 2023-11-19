@@ -32,7 +32,7 @@ func (p *Base) HealthReport() map[string]error {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	for _, s := range p.srvs {
-		maps.Copy(hr, s.HealthReport())
+		maps.Copy(s.HealthReport(), hr)
 	}
 	return hr
 }

@@ -16,8 +16,8 @@ import (
 
 	"github.com/smartcontractkit/chainlink-env/environment"
 	"github.com/smartcontractkit/chainlink-testing-framework/blockchain"
-	"github.com/smartcontractkit/chainlink-testing-framework/logging"
 	reportModel "github.com/smartcontractkit/chainlink-testing-framework/testreporters"
+	"github.com/smartcontractkit/chainlink-testing-framework/utils"
 
 	"github.com/smartcontractkit/chainlink/integration-tests/client"
 	"github.com/smartcontractkit/chainlink/integration-tests/contracts"
@@ -31,7 +31,6 @@ type VRFV2SoakTest struct {
 	TestReporter testreporters.VRFV2SoakTestReporter
 
 	testEnvironment *environment.Environment
-	namespace       string
 	ChainlinkNodes  []*client.ChainlinkK8sClient
 	chainClient     blockchain.EVMClient
 	DefaultNetwork  blockchain.EVMClient
@@ -74,13 +73,12 @@ func NewVRFV2SoakTest(inputs *VRFV2SoakTestInputs, chainlinkNodes []*client.Chai
 func (v *VRFV2SoakTest) Setup(t *testing.T, env *environment.Environment) {
 	v.ensureInputValues(t)
 	v.testEnvironment = env
-	v.namespace = v.testEnvironment.Cfg.Namespace
 	v.chainClient.ParallelTransactions(true)
 }
 
 // Run starts the VRFV2 soak test
 func (v *VRFV2SoakTest) Run(t *testing.T) {
-	l := logging.GetTestLogger(t)
+	l := utils.GetTestLogger(t)
 	l.Info().
 		Str("Test Duration", v.Inputs.TestDuration.Truncate(time.Second).String()).
 		Int("Max number of requests per minute wanted", v.Inputs.RequestsPerMinute).
@@ -163,12 +161,12 @@ func requestAndValidate(t *VRFV2SoakTest, requestNumber int) {
 // Networks returns the networks that the test is running on
 func (v *VRFV2SoakTest) TearDownVals(t *testing.T) (
 	*testing.T,
-	string,
+	*environment.Environment,
 	[]*client.ChainlinkK8sClient,
 	reportModel.TestReporter,
 	blockchain.EVMClient,
 ) {
-	return t, v.namespace, v.ChainlinkNodes, &v.TestReporter, v.chainClient
+	return t, v.testEnvironment, v.ChainlinkNodes, &v.TestReporter, v.chainClient
 }
 
 // ensureValues ensures that all values needed to run the test are present

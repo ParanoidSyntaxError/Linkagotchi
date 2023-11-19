@@ -16,15 +16,15 @@ import (
 )
 
 type Delegate struct {
-	legacyChains evm.LegacyChainContainer
-	ks           keystore.Eth
-	lggr         logger.Logger
+	chains evm.ChainSet
+	ks     keystore.Eth
+	lggr   logger.Logger
 }
 
 var _ job.Delegate = (*Delegate)(nil)
 
-func NewDelegate(legacyChains evm.LegacyChainContainer, ks keystore.Eth, lggr logger.Logger) *Delegate {
-	return &Delegate{legacyChains: legacyChains, ks: ks, lggr: lggr}
+func NewDelegate(chains evm.ChainSet, ks keystore.Eth, lggr logger.Logger) *Delegate {
+	return &Delegate{chains: chains, ks: ks, lggr: lggr}
 }
 
 func (d *Delegate) JobType() job.Type {
@@ -47,7 +47,7 @@ func (d *Delegate) ServicesForSpec(spec job.Job, qopts ...pg.QOpt) (services []j
 	if err2 != nil {
 		return nil, errors.Wrap(err2, "unmarshal gateway config")
 	}
-	handlerFactory := NewHandlerFactory(d.legacyChains, d.lggr)
+	handlerFactory := NewHandlerFactory(d.chains, d.lggr)
 	gateway, err := NewGatewayFromConfig(&gatewayConfig, handlerFactory, d.lggr)
 	if err != nil {
 		return nil, err

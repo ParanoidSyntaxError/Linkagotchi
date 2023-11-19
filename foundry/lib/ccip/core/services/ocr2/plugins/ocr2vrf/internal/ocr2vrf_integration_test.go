@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"os"
 	"testing"
 	"time"
 
@@ -322,12 +323,16 @@ func setupNodeOCR2(
 }
 
 func TestIntegration_OCR2VRF_ForwarderFlow(t *testing.T) {
-	t.Skip()
+	if os.Getenv("CI") == "" && os.Getenv("VRF_LOCAL_TESTING") == "" {
+		t.Skip("Skipping test locally.")
+	}
 	runOCR2VRFTest(t, true)
 }
 
 func TestIntegration_OCR2VRF(t *testing.T) {
-	t.Skip()
+	if os.Getenv("CI") == "" && os.Getenv("VRF_LOCAL_TESTING") == "" {
+		t.Skip("Skipping test locally.")
+	}
 	runOCR2VRFTest(t, false)
 }
 
@@ -426,8 +431,8 @@ func runOCR2VRFTest(t *testing.T, useForwarders bool) {
 	err = bootstrapNode.app.Start(testutils.Context(t))
 	require.NoError(t, err)
 
-	evmChains := bootstrapNode.app.GetRelayers().LegacyEVMChains()
-	require.NotNil(t, evmChains)
+	chainSet := bootstrapNode.app.GetChains().EVM
+	require.NotNil(t, chainSet)
 	bootstrapJobSpec := fmt.Sprintf(`
 type				= "bootstrap"
 name				= "bootstrap"

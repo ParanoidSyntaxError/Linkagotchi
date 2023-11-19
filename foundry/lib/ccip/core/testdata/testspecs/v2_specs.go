@@ -11,7 +11,6 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/assets"
 	"github.com/smartcontractkit/chainlink/v2/core/services/vrf/vrfcommon"
 	"github.com/smartcontractkit/chainlink/v2/core/services/webhook"
-	"github.com/smartcontractkit/chainlink/v2/core/utils"
 )
 
 var (
@@ -44,7 +43,6 @@ type                = "directrequest"
 schemaVersion       = 1
 name                = "%s"
 contractAddress     = "0x613a38AC1659769640aaE063C651F48E0250454C"
-evmChainID 			= "0"
 observationSource   = """
     ds1          [type=http method=GET url="http://example.com" allowunrestrictednetworkaccess="true"];
     ds1_parse    [type=jsonparse path="USD"];
@@ -58,7 +56,6 @@ schemaVersion       = 1
 name                = "example eth request event spec"
 contractAddress     = "0x613a38AC1659769640aaE063C651F48E0250454C"
 externalJobID       =  "123e4567-e89b-12d3-a456-426655440004"
-evmChainID 			= "0"
 observationSource   = """
     ds1          [type=http method=GET url="http://example.com" allowunrestrictednetworkaccess="true"];
     ds1_parse    [type=jsonparse path="USD"];
@@ -74,7 +71,6 @@ minContractPaymentLinkJuels  = "1000000000000000000000"
 name                         = "example eth request event spec with requesters and min contract payment"
 contractAddress              = "0x613a38AC1659769640aaE063C651F48E0250454C"
 externalJobID                = "123e4567-e89b-12d3-a456-426655440014"
-evmChainID                   = 0
 observationSource            = """
     ds1          [type=http method=GET url="http://example.com" allowunrestrictednetworkaccess="true"];
     ds1_parse    [type=jsonparse path="USD"];
@@ -88,7 +84,6 @@ schemaVersion       = 1
 name                = "example flux monitor spec"
 contractAddress     = "0x3cCad4715152693fE3BC4460591e3D3Fbd071b42"
 externalJobID       =  "123e4567-e89b-12d3-a456-426655440005"
-evmChainID          = 0
 threshold = 0.5
 absoluteThreshold = 0.0 # optional
 
@@ -255,7 +250,6 @@ type VRFSpecParams struct {
 	FromAddresses                 []string
 	PublicKey                     string
 	ObservationSource             string
-	EVMChainID                    string
 	RequestedConfsDelay           int
 	RequestTimeout                time.Duration
 	V2                            bool
@@ -358,16 +352,14 @@ vrf          [type=vrfv2
 estimate_gas [type=estimategaslimit
               to="%s"
               multiplier="1.1"
-              data="$(vrf.output)"
-]
+              data="$(vrf.output)"]
 simulate [type=ethcall
           to="%s"
 		  gas="$(estimate_gas)"
 		  gasPrice="$(jobSpec.maxGasPrice)"
 		  extractRevertReason=true
 		  contract="%s"
-		  data="$(vrf.output)"
-]
+		  data="$(vrf.output)"]
 decode_log->vrf->estimate_gas->simulate
 `, coordinatorAddress, coordinatorAddress, coordinatorAddress)
 	}
@@ -385,24 +377,19 @@ generate_proof          [type=vrfv2plus
 estimate_gas            [type=estimategaslimit
                          to="%s"
                          multiplier="1.1"
-                         data="$(generate_proof.output)"
-]
+                         data="$(generate_proof.output)"]
 simulate_fulfillment    [type=ethcall
                          to="%s"
 		                 gas="$(estimate_gas)"
 		                 gasPrice="$(jobSpec.maxGasPrice)"
 		                 extractRevertReason=true
 		                 contract="%s"
-		                 data="$(generate_proof.output)"
-]
+		                 data="$(generate_proof.output)"]
 decode_log->generate_proof->estimate_gas->simulate_fulfillment
 `, coordinatorAddress, coordinatorAddress, coordinatorAddress)
 	}
 	if params.ObservationSource != "" {
 		observationSource = params.ObservationSource
-	}
-	if params.EVMChainID == "" {
-		params.EVMChainID = "0"
 	}
 	template := `
 externalJobID = "%s"
@@ -410,7 +397,6 @@ type = "vrf"
 schemaVersion = 1
 name = "%s"
 coordinatorAddress = "%s"
-evmChainID         =  "%s"
 batchCoordinatorAddress = "%s"
 batchFulfillmentEnabled = %v
 batchFulfillmentGasMultiplier = %s
@@ -427,7 +413,7 @@ observationSource = """
 """
 `
 	toml := fmt.Sprintf(template,
-		jobID, name, coordinatorAddress, params.EVMChainID, batchCoordinatorAddress,
+		jobID, name, coordinatorAddress, batchCoordinatorAddress,
 		params.BatchFulfillmentEnabled, strconv.FormatFloat(batchFulfillmentGasMultiplier, 'f', 2, 64),
 		confirmations, params.RequestedConfsDelay, requestTimeout.String(), publicKey, chunkSize,
 		params.BackoffInitialDelay.String(), params.BackoffMaxDelay.String(), gasLanePrice.String(), observationSource)
@@ -451,7 +437,6 @@ observationSource = """
 		MinIncomingConfirmations: confirmations,
 		PublicKey:                publicKey,
 		ObservationSource:        observationSource,
-		EVMChainID:               params.EVMChainID,
 		RequestedConfsDelay:      params.RequestedConfsDelay,
 		RequestTimeout:           requestTimeout,
 		ChunkSize:                chunkSize,
@@ -506,7 +491,7 @@ func GenerateOCRSpec(params OCRSpecParams) OCRSpec {
 	if params.DS2BridgeName != "" {
 		ds2BridgeName = params.DS2BridgeName
 	}
-
+	// set to empty so it defaults to the default evm chain id
 	evmChainID := "0"
 	if params.EVMChainID != "" {
 		evmChainID = params.EVMChainID
@@ -600,21 +585,18 @@ ds -> ds_parse -> ds_multiply;
 
 // BlockhashStoreSpecParams defines params for building a blockhash store job spec.
 type BlockhashStoreSpecParams struct {
-	JobID                          string
-	Name                           string
-	CoordinatorV1Address           string
-	CoordinatorV2Address           string
-	CoordinatorV2PlusAddress       string
-	WaitBlocks                     int
-	HeartbeatPeriod                time.Duration
-	LookbackBlocks                 int
-	BlockhashStoreAddress          string
-	TrustedBlockhashStoreAddress   string
-	TrustedBlockhashStoreBatchSize int32
-	PollPeriod                     time.Duration
-	RunTimeout                     time.Duration
-	EVMChainID                     int64
-	FromAddresses                  []string
+	JobID                    string
+	Name                     string
+	CoordinatorV1Address     string
+	CoordinatorV2Address     string
+	CoordinatorV2PlusAddress string
+	WaitBlocks               int
+	LookbackBlocks           int
+	BlockhashStoreAddress    string
+	PollPeriod               time.Duration
+	RunTimeout               time.Duration
+	EVMChainID               int64
+	FromAddresses            []string
 }
 
 // BlockhashStoreSpec defines a blockhash store job spec.
@@ -648,14 +630,6 @@ func GenerateBlockhashStoreSpec(params BlockhashStoreSpecParams) BlockhashStoreS
 
 	if params.CoordinatorV2PlusAddress == "" {
 		params.CoordinatorV2PlusAddress = "0x92B5e28Ac583812874e4271380c7d070C5FB6E6b"
-	}
-
-	if params.TrustedBlockhashStoreAddress == "" {
-		params.TrustedBlockhashStoreAddress = utils.ZeroAddress.Hex()
-	}
-
-	if params.TrustedBlockhashStoreBatchSize == 0 {
-		params.TrustedBlockhashStoreBatchSize = 20
 	}
 
 	if params.WaitBlocks == 0 {
@@ -699,20 +673,30 @@ coordinatorV2PlusAddress = "%s"
 waitBlocks = %d
 lookbackBlocks = %d
 blockhashStoreAddress = "%s"
-trustedBlockhashStoreAddress = "%s"
-trustedBlockhashStoreBatchSize = %d
 pollPeriod = "%s"
 runTimeout = "%s"
 evmChainID = "%d"
 fromAddresses = %s
-heartbeatPeriod = "%s"
 `
 	toml := fmt.Sprintf(template, params.Name, params.CoordinatorV1Address,
 		params.CoordinatorV2Address, params.CoordinatorV2PlusAddress, params.WaitBlocks, params.LookbackBlocks,
-		params.BlockhashStoreAddress, params.TrustedBlockhashStoreAddress, params.TrustedBlockhashStoreBatchSize, params.PollPeriod.String(), params.RunTimeout.String(),
-		params.EVMChainID, formattedFromAddresses, params.HeartbeatPeriod.String())
+		params.BlockhashStoreAddress, params.PollPeriod.String(), params.RunTimeout.String(),
+		params.EVMChainID, formattedFromAddresses)
 
 	return BlockhashStoreSpec{BlockhashStoreSpecParams: params, toml: toml}
+}
+
+type CCIPSpecParams struct {
+	contractID string
+}
+
+type CCIPSpec struct {
+	CCIPSpecParams
+	toml string
+}
+
+func (c CCIPSpec) Toml() string {
+	return c.toml
 }
 
 // BlockHeaderFeederSpecParams defines params for building a block header feeder job spec.
@@ -835,4 +819,166 @@ storeBlockhashesBatchSize = %d
 		params.StoreBlockhashesBatchSize)
 
 	return BlockHeaderFeederSpec{BlockHeaderFeederSpecParams: params, toml: toml}
+}
+
+// LegacyGasStationServerSpecParams defines params for building a legacy gas station server job spec.
+type LegacyGasStationServerSpecParams struct {
+	JobID             string
+	Name              string
+	ForwarderAddress  string
+	EVMChainID        uint64
+	CCIPChainSelector uint64
+	FromAddresses     []string
+}
+
+// LegacyGasStationServerSpec defines a legacy gas station server job spec.
+type LegacyGasStationServerSpec struct {
+	LegacyGasStationServerSpecParams
+	toml string
+}
+
+// Toml returns the LegacyGasStationServerSpec in TOML string form.
+func (l LegacyGasStationServerSpec) Toml() string {
+	return l.toml
+}
+
+// GenerateLegacyGasStationServerSpec creates a LegacyGasStationServerSpec from the given params.
+func GenerateLegacyGasStationServerSpec(params LegacyGasStationServerSpecParams) LegacyGasStationServerSpec {
+	if params.JobID == "" {
+		params.JobID = "123e4567-e89b-12d3-a456-426655442211"
+	}
+
+	if params.Name == "" {
+		params.Name = "legacygasstationserver"
+	}
+
+	if params.ForwarderAddress == "" {
+		params.ForwarderAddress = "0xb078DA5cDa45Ee0f5D2007C03fCf8d9461395e6c"
+	}
+
+	if params.CCIPChainSelector == 0 {
+		params.CCIPChainSelector = 125500
+	}
+
+	var formattedFromAddresses string
+	if params.FromAddresses == nil {
+		formattedFromAddresses = `["0xBe0b739f841bC113D4F4e4CdD16086ffAbB5f39f"]`
+	} else {
+		var addresses []string
+		for _, address := range params.FromAddresses {
+			addresses = append(addresses, fmt.Sprintf("%q", address))
+		}
+		formattedFromAddresses = fmt.Sprintf("[%s]", strings.Join(addresses, ", "))
+	}
+
+	template := `
+type = "legacygasstationserver"
+schemaVersion = 1
+name = "%s"
+forwarderAddress = "%s"
+evmChainID = "%d"
+ccipChainSelector = "%d"
+fromAddresses = %s
+observationSource = """
+estimate_gas [type=estimategaslimit
+              to="%s"
+              multiplier="1.1"
+              data="$(jobRun.payload)"]
+simulate [type=ethcall
+          to="%s"
+          gas="$(estimate_gas)"
+          gasPrice="$(jobSpec.maxGasPrice)"
+          extractRevertReason=true
+          contract="%s"
+          data="$(jobRun.payload)"]
+estimate_gas->simulate
+"""
+`
+	toml := fmt.Sprintf(template, params.Name, params.ForwarderAddress, params.EVMChainID, params.CCIPChainSelector,
+		formattedFromAddresses, params.ForwarderAddress, params.ForwarderAddress, params.ForwarderAddress)
+
+	return LegacyGasStationServerSpec{LegacyGasStationServerSpecParams: params, toml: toml}
+}
+
+// LegacyGasStationSidecarSpecParams defines params for building a legacy gas station sidecar job spec.
+type LegacyGasStationSidecarSpecParams struct {
+	JobID             string
+	Name              string
+	ForwarderAddress  string
+	OffRampAddress    string
+	LookbackBlocks    int
+	PollPeriod        time.Duration
+	RunTimeout        time.Duration
+	EVMChainID        uint64
+	CCIPChainSelector uint64
+	StatusUpdateURL   string
+}
+
+// LegacyGasStationSidecarSpec defines a legacy gas station sidecar job spec.
+type LegacyGasStationSidecarSpec struct {
+	LegacyGasStationSidecarSpecParams
+	toml string
+}
+
+// Toml returns the LegacyGasStationSidecarSpec in TOML string form.
+func (l LegacyGasStationSidecarSpec) Toml() string {
+	return l.toml
+}
+
+// GenerateLegacyGasStationSidecarSpec creates a LegacyGasStationSidecarSpec from the given params.
+func GenerateLegacyGasStationSidecarSpec(params LegacyGasStationSidecarSpecParams) LegacyGasStationSidecarSpec {
+	if params.JobID == "" {
+		params.JobID = "123e4567-e89b-12d3-a456-426655442211"
+	}
+
+	if params.Name == "" {
+		params.Name = "legacygasstationsidecar"
+	}
+
+	if params.ForwarderAddress == "" {
+		params.ForwarderAddress = "0x2d7F888fE0dD469bd81A12f77e6291508f714d4B"
+	}
+
+	if params.OffRampAddress == "" {
+		params.OffRampAddress = "0x016D54091ee83D42aF46e4F2d7177D0A232D2bDa"
+	}
+
+	if params.CCIPChainSelector == 0 {
+		params.CCIPChainSelector = 125500
+	}
+
+	if params.LookbackBlocks == 0 {
+		params.LookbackBlocks = 10000
+	}
+
+	if params.PollPeriod == 0 {
+		params.PollPeriod = 10 * time.Second
+	}
+
+	if params.RunTimeout == 0 {
+		params.RunTimeout = 10 * time.Second
+	}
+
+	if params.StatusUpdateURL == "" {
+		params.StatusUpdateURL = "http://testurl.com"
+	}
+
+	template := `
+type = "legacygasstationsidecar"
+schemaVersion = 1
+name = "%s"
+forwarderAddress = "%s"
+offRampAddress = "%s"
+lookbackBlocks = %d
+pollPeriod = "%s"
+runTimeout = "%s"
+evmChainID = "%d"
+ccipChainSelector = "%d"
+statusUpdateURL = "%s"
+`
+	toml := fmt.Sprintf(template, params.Name, params.ForwarderAddress,
+		params.OffRampAddress, params.LookbackBlocks, params.PollPeriod,
+		params.RunTimeout, params.EVMChainID, params.CCIPChainSelector, params.StatusUpdateURL)
+
+	return LegacyGasStationSidecarSpec{LegacyGasStationSidecarSpecParams: params, toml: toml}
 }

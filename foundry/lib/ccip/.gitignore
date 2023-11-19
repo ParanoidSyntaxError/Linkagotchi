@@ -45,7 +45,6 @@ core/cmd/TestClient_ImportExportP2PKeyBundle_test_key.json
 output.txt
 race.*
 golangci-lint-output.txt
-golangci-lint/
 
 # DB state
 ./db/
@@ -59,8 +58,6 @@ core/web/assets
 
 # Integration Tests
 integration-tests/**/logs/
-integration-tests/**/tmp_*
-integration-tests/**/testconfig/override/**.env
 tests-*.xml
 *.test
 tmp-manifest-*.yaml
@@ -73,16 +70,6 @@ cosign.*
 dist/
 MacOSX*
 
-cache
-core/services/ocr2/plugins/ccip/transactions.rlp
-lcov.info
-!core/services/ocr2/plugins/ccip/internal/cache/
-
-
-core/scripts/ccip/json/credentials
-core/scripts/ccip/json/deployments
-core/scripts/ccip/csv/node-wallets
-
 # Test & linter reports
 *report.xml
 *report.json
@@ -93,9 +80,3 @@ contracts/yarn.lock
 
 # Ignore DevSpace cache and log folder
 .devspace/
-
-/core/scripts/ccip/json/credentials
-/core/scripts/ccip/revert-reason/bin/ccip-revert-reason
-
-# dependencies generated after running `go mod vendor`
-vendor/

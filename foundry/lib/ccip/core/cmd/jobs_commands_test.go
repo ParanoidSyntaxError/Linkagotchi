@@ -3,11 +3,9 @@ package cmd_test
 import (
 	"bytes"
 	"flag"
-	"fmt"
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/urfave/cli"
@@ -237,6 +235,30 @@ func TestJob_FriendlyCreatedAt(t *testing.T) {
 			now.Format(time.RFC3339),
 		},
 		{
+			"gets the legacy gas station server spec created at timestamp",
+			&cmd.JobPresenter{
+				JobResource: presenters.JobResource{
+					Type: presenters.LegacyGasStationServerJobSpec,
+					LegacyGasStationServerSpec: &presenters.LegacyGasStationServerSpec{
+						CreatedAt: now,
+					},
+				},
+			},
+			now.Format(time.RFC3339),
+		},
+		{
+			"gets the legacy gas station sidecar spec created at timestamp",
+			&cmd.JobPresenter{
+				JobResource: presenters.JobResource{
+					Type: presenters.LegacyGasStationSidecarJobSpec,
+					LegacyGasStationSidecarSpec: &presenters.LegacyGasStationSidecarSpec{
+						CreatedAt: now,
+					},
+				},
+			},
+			now.Format(time.RFC3339),
+		},
+		{
 			"invalid type",
 			&cmd.JobPresenter{
 				JobResource: presenters.JobResource{
@@ -295,26 +317,6 @@ func TestJob_ToRows(t *testing.T) {
 	}, job.ToRows())
 }
 
-const directRequestSpecTemplate = `
-type                = "directrequest"
-schemaVersion       = 1
-evmChainID          = "0"
-name                = "example eth request event spec"
-contractAddress     = "0x613a38AC1659769640aaE063C651F48E0250454C"
-externalJobID       = "%s"
-observationSource   = """
-    ds1          [type=http method=GET url="http://example.com" allowunrestrictednetworkaccess="true"];
-    ds1_merge    [type=merge left="{}"]
-    ds1_parse    [type=jsonparse path="USD"];
-    ds1_multiply [type=multiply times=100];
-    ds1 -> ds1_parse -> ds1_multiply;
-"""
-`
-
-func getDirectRequestSpec() string {
-	return fmt.Sprintf(directRequestSpecTemplate, uuid.New())
-}
-
 func TestShell_ListFindJobs(t *testing.T) {
 	t.Parallel()
 
@@ -327,7 +329,7 @@ func TestShell_ListFindJobs(t *testing.T) {
 	fs := flag.NewFlagSet("", flag.ExitOnError)
 	cltest.FlagSetApplyFromAction(client.CreateJob, fs, "")
 
-	require.NoError(t, fs.Parse([]string{getDirectRequestSpec()}))
+	require.NoError(t, fs.Parse([]string{"../testdata/tomlspecs/direct-request-spec.toml"}))
 
 	err := client.CreateJob(cli.NewContext(nil, fs, nil))
 	require.NoError(t, err)
@@ -353,7 +355,7 @@ func TestShell_ShowJob(t *testing.T) {
 	fs := flag.NewFlagSet("", flag.ExitOnError)
 	cltest.FlagSetApplyFromAction(client.CreateJob, fs, "")
 
-	require.NoError(t, fs.Parse([]string{getDirectRequestSpec()}))
+	require.NoError(t, fs.Parse([]string{"../testdata/tomlspecs/direct-request-spec.toml"}))
 
 	err := client.CreateJob(cli.NewContext(nil, fs, nil))
 	require.NoError(t, err)
@@ -422,7 +424,7 @@ func TestShell_DeleteJob(t *testing.T) {
 	fs := flag.NewFlagSet("", flag.ExitOnError)
 	cltest.FlagSetApplyFromAction(client.CreateJob, fs, "")
 
-	require.NoError(t, fs.Parse([]string{getDirectRequestSpec()}))
+	require.NoError(t, fs.Parse([]string{"../testdata/tomlspecs/direct-request-spec.toml"}))
 
 	err := client.CreateJob(cli.NewContext(nil, fs, nil))
 	require.NoError(t, err)

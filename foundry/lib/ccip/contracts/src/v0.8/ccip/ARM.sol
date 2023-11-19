@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.19;
 
-import {ITypeAndVersion} from "../shared/interfaces/ITypeAndVersion.sol";
+import {TypeAndVersionInterface} from "../interfaces/TypeAndVersionInterface.sol";
 import {IARM} from "./interfaces/IARM.sol";
 
 import {OwnerIsCreator} from "./../shared/access/OwnerIsCreator.sol";
 
-/// @dev This contract is owned by RMN, if changing, please notify the RMN maintainers.
-contract ARM is IARM, OwnerIsCreator, ITypeAndVersion {
+contract ARM is IARM, OwnerIsCreator, TypeAndVersionInterface {
   // STATIC CONFIG
   // solhint-disable-next-line chainlink-solidity/all-caps-constant-storage-variables
   string public constant override typeAndVersion = "ARM 1.0.0";
@@ -116,7 +115,6 @@ contract ARM is IARM, OwnerIsCreator, ITypeAndVersion {
 
   // EVENTS, ERRORS
   event ConfigSet(uint32 indexed configVersion, Config config);
-
   error InvalidConfig();
 
   event TaggedRootBlessed(uint32 indexed configVersion, IARM.TaggedRoot taggedRoot, uint16 accumulatedWeight);

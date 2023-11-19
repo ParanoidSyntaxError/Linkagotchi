@@ -47,10 +47,8 @@ type (
 	NullBalanceMonitor struct{}
 )
 
-var _ BalanceMonitor = (*balanceMonitor)(nil)
-
 // NewBalanceMonitor returns a new balanceMonitor
-func NewBalanceMonitor(ethClient evmclient.Client, ethKeyStore keystore.Eth, logger logger.Logger) *balanceMonitor {
+func NewBalanceMonitor(ethClient evmclient.Client, ethKeyStore keystore.Eth, logger logger.Logger) BalanceMonitor {
 	chainId := ethClient.ConfiguredChainID()
 	bm := &balanceMonitor{
 		utils.StartStopOnce{},
@@ -118,7 +116,7 @@ func (bm *balanceMonitor) updateBalance(ethBal assets.Eth, address gethCommon.Ad
 	bm.ethBalances[address] = &ethBal
 	bm.ethBalancesMtx.Unlock()
 
-	lgr := bm.logger.Named("BalanceLog").With(
+	lgr := bm.logger.Named("balance_log").With(
 		"address", address.Hex(),
 		"ethBalance", ethBal.String(),
 		"weiBalance", ethBal.ToInt())

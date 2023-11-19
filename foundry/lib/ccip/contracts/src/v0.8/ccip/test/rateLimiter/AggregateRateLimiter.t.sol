@@ -6,6 +6,7 @@ import {Internal} from "../../libraries/Internal.sol";
 import {Client} from "../../libraries/Client.sol";
 import {AggregateRateLimiterHelper} from "../helpers/AggregateRateLimiterHelper.sol";
 import {AggregateRateLimiter} from "../../AggregateRateLimiter.sol";
+import {PriceRegistry} from "../../PriceRegistry.sol";
 import {PriceRegistrySetup} from "../priceRegistry/PriceRegistry.t.sol";
 
 import "../BaseTest.t.sol";
@@ -15,13 +16,13 @@ contract AggregateTokenLimiterSetup is BaseTest, PriceRegistrySetup {
   RateLimiter.Config s_config;
 
   address immutable TOKEN = 0x21118E64E1fB0c487F25Dd6d3601FF6af8D32E4e;
-  uint224 constant TOKEN_PRICE = 4e18;
+  uint192 constant TOKEN_PRICE = 4e18;
 
   function setUp() public virtual override(BaseTest, PriceRegistrySetup) {
     BaseTest.setUp();
     PriceRegistrySetup.setUp();
 
-    Internal.PriceUpdates memory priceUpdates = getSingleTokenPriceUpdateStruct(TOKEN, TOKEN_PRICE);
+    Internal.PriceUpdates memory priceUpdates = getSinglePriceUpdateStruct(TOKEN, TOKEN_PRICE);
     s_priceRegistry.updatePrices(priceUpdates);
 
     s_config = RateLimiter.Config({isEnabled: true, rate: 5, capacity: 100});

@@ -213,6 +213,7 @@ func TestConfig_Marshal(t *testing.T) {
 
 	global := Config{
 		Core: toml.Core{
+			ExplorerURL:         mustURL("http://explorer.url"),
 			InsecureFastScrypt:  ptr(true),
 			RootDir:             ptr("test/root/dir"),
 			ShutdownGracePeriod: models.MustNewDuration(10 * time.Second),
@@ -239,10 +240,11 @@ func TestConfig_Marshal(t *testing.T) {
 	}
 
 	full.Feature = toml.Feature{
-		FeedsManager: ptr(true),
-		LogPoller:    ptr(true),
-		UICSAKeys:    ptr(true),
-		CCIP:         ptr(true),
+		FeedsManager:     ptr(true),
+		LogPoller:        ptr(true),
+		UICSAKeys:        ptr(true),
+		CCIP:             ptr(true),
+		LegacyGasStation: ptr(true),
 	}
 	full.Database = toml.Database{
 		DefaultIdleInTxSessionTimeout: models.MustNewDuration(time.Minute),
@@ -272,21 +274,14 @@ func TestConfig_Marshal(t *testing.T) {
 	full.TelemetryIngress = toml.TelemetryIngress{
 		UniConn:      ptr(true),
 		Logging:      ptr(true),
+		ServerPubKey: ptr("test-pub-key"),
+		URL:          mustURL("https://prom.test"),
 		BufferSize:   ptr[uint16](1234),
 		MaxBatchSize: ptr[uint16](4321),
 		SendInterval: models.MustNewDuration(time.Minute),
 		SendTimeout:  models.MustNewDuration(5 * time.Second),
 		UseBatchSend: ptr(true),
-		URL:          ptr(models.URL{}),
-		ServerPubKey: ptr(""),
-		Endpoints: []toml.TelemetryIngressEndpoint{{
-			Network:      ptr("EVM"),
-			ChainID:      ptr("1"),
-			ServerPubKey: ptr("test-pub-key"),
-			URL:          mustURL("prom.test")},
-		},
 	}
-
 	full.Log = toml.Log{
 		Level:       ptr(toml.LogLevel(zapcore.DPanicLevel)),
 		JSONConsole: ptr(true),
@@ -616,12 +611,11 @@ func TestConfig_Marshal(t *testing.T) {
 			ChainID: ptr("Malaga-420"),
 			Enabled: ptr(true),
 			Chain: coscfg.Chain{
-				Bech32Prefix:         ptr("wasm"),
 				BlockRate:            relayutils.MustNewDuration(time.Minute),
 				BlocksUntilTxTimeout: ptr[int64](12),
 				ConfirmPollPeriod:    relayutils.MustNewDuration(time.Second),
 				FallbackGasPrice:     mustDecimal("0.001"),
-				GasToken:             ptr("ucosm"),
+				FCDURL:               relayutils.MustParseURL("http://cosmos.com"),
 				GasLimitMultiplier:   mustDecimal("1.2"),
 				MaxMsgsPerBatch:      ptr[int64](17),
 				OCR2CachePollPeriod:  relayutils.MustNewDuration(time.Minute),
@@ -642,7 +636,8 @@ func TestConfig_Marshal(t *testing.T) {
 		exp    string
 	}{
 		{"empty", Config{}, ``},
-		{"global", global, `InsecureFastScrypt = true
+		{"global", global, `ExplorerURL = 'http://explorer.url'
+InsecureFastScrypt = true
 RootDir = 'test/root/dir'
 ShutdownGracePeriod = '10s'
 
@@ -663,6 +658,7 @@ FeedsManager = true
 LogPoller = true
 UICSAKeys = true
 CCIP = true
+LegacyGasStation = true
 `},
 		{"Database", Config{Core: toml.Core{Database: full.Database}}, `[Database]
 DefaultIdleInTxSessionTimeout = '1m0s'
@@ -692,21 +688,14 @@ LeaseRefreshInterval = '1s'
 		{"TelemetryIngress", Config{Core: toml.Core{TelemetryIngress: full.TelemetryIngress}}, `[TelemetryIngress]
 UniConn = true
 Logging = true
+ServerPubKey = 'test-pub-key'
+URL = 'https://prom.test'
 BufferSize = 1234
 MaxBatchSize = 4321
 SendInterval = '1m0s'
 SendTimeout = '5s'
 UseBatchSend = true
-URL = ''
-ServerPubKey = ''
-
-[[TelemetryIngress.Endpoints]]
-Network = 'EVM'
-ChainID = '1'
-URL = 'prom.test'
-ServerPubKey = 'test-pub-key'
 `},
-
 		{"Log", Config{Core: toml.Core{Log: full.Log}}, `[Log]
 Level = 'crit'
 JSONConsole = true
@@ -971,12 +960,11 @@ SendOnly = true
 		{"Cosmos", Config{Cosmos: full.Cosmos}, `[[Cosmos]]
 ChainID = 'Malaga-420'
 Enabled = true
-Bech32Prefix = 'wasm'
 BlockRate = '1m0s'
 BlocksUntilTxTimeout = 12
 ConfirmPollPeriod = '1s'
 FallbackGasPrice = '0.001'
-GasToken = 'ucosm'
+FCDURL = 'http://cosmos.com'
 GasLimitMultiplier = '1.2'
 MaxMsgsPerBatch = 17
 OCR2CachePollPeriod = '1m0s'
@@ -1075,17 +1063,6 @@ func TestConfig_full(t *testing.T) {
 		}
 	}
 
-	// Except for TelemetryIngress.ServerPubKey as this will be removed in the future
-	// and its only use is to signal to NOPs that these fields are no longer allowed
-	if got.TelemetryIngress.ServerPubKey == nil {
-		got.TelemetryIngress.ServerPubKey = ptr("")
-	}
-	// Except for TelemetryIngress.URL as this will be removed in the future
-	// and its only use is to signal to NOPs that these fields are no longer allowed
-	if got.TelemetryIngress.URL == nil {
-		got.TelemetryIngress.URL = new(models.URL)
-	}
-
 	cfgtest.AssertFieldsNotNil(t, got)
 }
 
@@ -1121,7 +1098,7 @@ func TestConfig_Validate(t *testing.T) {
 		- 1: 6 errors:
 			- ChainType: invalid value (Foo): must not be set with this chain id
 			- Nodes: missing: must have at least one node
-			- ChainType: invalid value (Foo): must be one of arbitrum, metis, xdai, optimismBedrock, celo, kroma, wemix or omitted
+			- ChainType: invalid value (Foo): must be one of arbitrum, metis, xdai, optimismBedrock, celo or omitted
 			- HeadTracker.HistoryDepth: invalid value (30): must be equal to or greater than FinalityDepth
 			- GasEstimator: 2 errors:
 				- FeeCapDefault: invalid value (101 wei): must be equal to PriceMax (99 wei) since you are using FixedPrice estimation with gas bumping disabled in EIP1559 mode - PriceMax will be used as the FeeCap for transactions instead of FeeCapDefault
@@ -1130,7 +1107,7 @@ func TestConfig_Validate(t *testing.T) {
 		- 2: 5 errors:
 			- ChainType: invalid value (Arbitrum): only "optimismBedrock" can be used with this chain id
 			- Nodes: missing: must have at least one node
-			- ChainType: invalid value (Arbitrum): must be one of arbitrum, metis, xdai, optimismBedrock, celo, kroma, wemix or omitted
+			- ChainType: invalid value (Arbitrum): must be one of arbitrum, metis, xdai, optimismBedrock, celo or omitted
 			- FinalityDepth: invalid value (0): must be greater than or equal to 1
 			- MinIncomingConfirmations: invalid value (0): must be greater than or equal to 1
 		- 3.Nodes: 5 errors:
@@ -1328,7 +1305,9 @@ func TestSecrets_Validate(t *testing.T) {
 	}{
 		{name: "partial",
 			toml: `
-Database.AllowSimplePasswords = true`,
+Database.AllowSimplePasswords = true
+Explorer.AccessKey = "access_key"
+Explorer.Secret = "secret"`,
 			exp: `invalid secrets: 2 errors:
 	- Database.URL: empty: must be provided and non-empty
 	- Password.Keystore: empty: must be provided and non-empty`},

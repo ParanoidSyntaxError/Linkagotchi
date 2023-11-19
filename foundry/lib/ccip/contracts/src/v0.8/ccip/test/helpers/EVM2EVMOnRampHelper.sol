@@ -9,6 +9,7 @@ contract EVM2EVMOnRampHelper is EVM2EVMOnRamp, IgnoreContractSize {
     StaticConfig memory staticConfig,
     DynamicConfig memory dynamicConfig,
     Internal.PoolUpdate[] memory tokensAndPools,
+    address[] memory allowlist,
     RateLimiter.Config memory rateLimiterConfig,
     FeeTokenConfigArgs[] memory feeTokenConfigs,
     TokenTransferFeeConfigArgs[] memory tokenTransferFeeConfigArgs,
@@ -18,6 +19,7 @@ contract EVM2EVMOnRampHelper is EVM2EVMOnRamp, IgnoreContractSize {
       staticConfig,
       dynamicConfig,
       tokensAndPools,
+      allowlist,
       rateLimiterConfig,
       feeTokenConfigs,
       tokenTransferFeeConfigArgs,
@@ -25,21 +27,11 @@ contract EVM2EVMOnRampHelper is EVM2EVMOnRamp, IgnoreContractSize {
     )
   {}
 
-  function getDataAvailabilityCost(
-    uint112 dataAvailabilityGasPrice,
-    uint256 messageDataLength,
-    uint256 numberOfTokens,
-    uint32 tokenTransferBytesOverhead
-  ) external view returns (uint256) {
-    return
-      _getDataAvailabilityCost(dataAvailabilityGasPrice, messageDataLength, numberOfTokens, tokenTransferBytesOverhead);
-  }
-
-  function getTokenTransferCost(
+  function getTokenTransferFee(
     address feeToken,
-    uint224 feeTokenPrice,
+    uint192 feeTokenPrice,
     Client.EVMTokenAmount[] calldata tokenAmounts
-  ) external view returns (uint256, uint32, uint32) {
-    return _getTokenTransferCost(feeToken, feeTokenPrice, tokenAmounts);
+  ) external view returns (uint256) {
+    return _getTokenTransferFee(feeToken, feeTokenPrice, tokenAmounts);
   }
 }

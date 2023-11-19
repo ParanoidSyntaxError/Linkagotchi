@@ -19,10 +19,7 @@ import (
 
 	"github.com/smartcontractkit/sqlx"
 
-	"github.com/smartcontractkit/chainlink-relay/pkg/types"
-
 	"github.com/smartcontractkit/chainlink/v2/core/bridges"
-	"github.com/smartcontractkit/chainlink/v2/core/chains"
 	"github.com/smartcontractkit/chainlink/v2/core/chains/evm"
 	evmconfig "github.com/smartcontractkit/chainlink/v2/core/chains/evm/config"
 	"github.com/smartcontractkit/chainlink/v2/core/config"
@@ -30,6 +27,9 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/null"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/ethkey"
+
+	ccipconfig "github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/config"
+
 	medianconfig "github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/median/config"
 	"github.com/smartcontractkit/chainlink/v2/core/services/pg"
 	"github.com/smartcontractkit/chainlink/v2/core/services/pipeline"
@@ -41,7 +41,6 @@ import (
 var (
 	ErrNoSuchKeyBundle      = errors.New("no such key bundle exists")
 	ErrNoSuchTransmitterKey = errors.New("no such transmitter key exists")
-	ErrNoSuchSendingKey     = errors.New("no such sending key exists")
 	ErrNoSuchPublicKey      = errors.New("no such public key exists")
 )
 
@@ -86,20 +85,20 @@ type ORMConfig interface {
 }
 
 type orm struct {
-	q            pg.Q
-	legacyChains evm.LegacyChainContainer
-	keyStore     keystore.Master
-	pipelineORM  pipeline.ORM
-	lggr         logger.SugaredLogger
-	cfg          pg.QConfig
-	bridgeORM    bridges.ORM
+	q           pg.Q
+	chainSet    evm.ChainSet
+	keyStore    keystore.Master
+	pipelineORM pipeline.ORM
+	lggr        logger.SugaredLogger
+	cfg         pg.QConfig
+	bridgeORM   bridges.ORM
 }
 
 var _ ORM = (*orm)(nil)
 
 func NewORM(
 	db *sqlx.DB,
-	legacyChains evm.LegacyChainContainer,
+	chainSet evm.ChainSet,
 	pipelineORM pipeline.ORM,
 	bridgeORM bridges.ORM,
 	keyStore keystore.Master, // needed to validation key properties on new job creation
@@ -108,13 +107,13 @@ func NewORM(
 ) *orm {
 	namedLogger := logger.Sugared(lggr.Named("JobORM"))
 	return &orm{
-		q:            pg.NewQ(db, namedLogger, cfg),
-		legacyChains: legacyChains,
-		keyStore:     keyStore,
-		pipelineORM:  pipelineORM,
-		bridgeORM:    bridgeORM,
-		lggr:         namedLogger,
-		cfg:          cfg,
+		q:           pg.NewQ(db, namedLogger, cfg),
+		chainSet:    chainSet,
+		keyStore:    keyStore,
+		pipelineORM: pipelineORM,
+		bridgeORM:   bridgeORM,
+		lggr:        namedLogger,
+		cfg:         cfg,
 	}
 }
 func (o *orm) Close() error {
@@ -167,9 +166,6 @@ func (o *orm) CreateJob(jb *Job, qopts ...pg.QOpt) error {
 
 		switch jb.Type {
 		case DirectRequest:
-			if jb.DirectRequestSpec.EVMChainID == nil {
-				return errors.New("evm chain id must be defined")
-			}
 			var specID int32
 			sql := `INSERT INTO direct_request_specs (contract_address, min_incoming_confirmations, requesters, min_contract_payment, evm_chain_id, created_at, updated_at)
 			VALUES (:contract_address, :min_incoming_confirmations, :requesters, :min_contract_payment, :evm_chain_id, now(), now())
@@ -179,9 +175,6 @@ func (o *orm) CreateJob(jb *Job, qopts ...pg.QOpt) error {
 			}
 			jb.DirectRequestSpecID = &specID
 		case FluxMonitor:
-			if jb.FluxMonitorSpec.EVMChainID == nil {
-				return errors.New("evm chain id must be defined")
-			}
 			var specID int32
 			sql := `INSERT INTO flux_monitor_specs (contract_address, threshold, absolute_threshold, poll_timer_period, poll_timer_disabled, idle_timer_period, idle_timer_disabled,
 					drumbeat_schedule, drumbeat_random_delay, drumbeat_enabled, min_payment, evm_chain_id, created_at, updated_at)
@@ -193,10 +186,6 @@ func (o *orm) CreateJob(jb *Job, qopts ...pg.QOpt) error {
 			}
 			jb.FluxMonitorSpecID = &specID
 		case OffchainReporting:
-			if jb.OCROracleSpec.EVMChainID == nil {
-				return errors.New("evm chain id must be defined")
-			}
-
 			var specID int32
 			if jb.OCROracleSpec.EncryptedOCRKeyBundleID != nil {
 				_, err := o.keyStore.OCR().Get(jb.OCROracleSpec.EncryptedOCRKeyBundleID.String())
@@ -211,7 +200,16 @@ func (o *orm) CreateJob(jb *Job, qopts ...pg.QOpt) error {
 				}
 			}
 
+			if jb.OCROracleSpec.EVMChainID == nil {
+				// If unspecified, assume we're creating a job intended to run on default chain id
+				newChain, err := o.chainSet.Default()
+				if err != nil {
+					return err
+				}
+				jb.OCROracleSpec.EVMChainID = utils.NewBig(newChain.ID())
+			}
 			newChainID := jb.OCROracleSpec.EVMChainID
+
 			existingSpec := new(OCROracleSpec)
 			err := tx.Get(existingSpec, `SELECT * FROM ocr_oracle_specs WHERE contract_address = $1 and (evm_chain_id = $2 or evm_chain_id IS NULL) LIMIT 1;`,
 				jb.OCROracleSpec.ContractAddress, newChainID,
@@ -247,10 +245,6 @@ func (o *orm) CreateJob(jb *Job, qopts ...pg.QOpt) error {
 				}
 			}
 
-			if jb.OCR2OracleSpec.RelayConfig["sendingKeys"] != nil && jb.OCR2OracleSpec.TransmitterID.Valid {
-				return errors.New("sending keys and transmitter ID can't both be defined")
-			}
-
 			// checks if they are present and if they are valid
 			sendingKeysDefined, err := areSendingKeysDefined(jb, o.keyStore)
 			if err != nil {
@@ -261,9 +255,13 @@ func (o *orm) CreateJob(jb *Job, qopts ...pg.QOpt) error {
 				return errors.New("neither sending keys nor transmitter ID is defined")
 			}
 
+			if sendingKeysDefined && jb.OCR2OracleSpec.TransmitterID.Valid {
+				return errors.New("sending keys and transmitter ID can't both be defined")
+			}
+
 			if !sendingKeysDefined {
-				if err = ValidateKeyStoreMatch(jb.OCR2OracleSpec, o.keyStore, jb.OCR2OracleSpec.TransmitterID.String); err != nil {
-					return errors.Wrap(ErrNoSuchTransmitterKey, err.Error())
+				if err = validateKeyStoreMatch(jb.OCR2OracleSpec, o.keyStore, jb.OCR2OracleSpec.TransmitterID.String); err != nil {
+					return err
 				}
 			}
 
@@ -271,7 +269,7 @@ func (o *orm) CreateJob(jb *Job, qopts ...pg.QOpt) error {
 				return errors.Errorf("forwarding is not currently supported for %s jobs", jb.OCR2OracleSpec.PluginType)
 			}
 
-			if jb.OCR2OracleSpec.PluginType == types.Mercury {
+			if jb.OCR2OracleSpec.PluginType == Mercury {
 				if jb.OCR2OracleSpec.FeedID == nil {
 					return errors.New("feed ID is required for mercury plugin type")
 				}
@@ -281,7 +279,7 @@ func (o *orm) CreateJob(jb *Job, qopts ...pg.QOpt) error {
 				}
 			}
 
-			if jb.OCR2OracleSpec.PluginType == types.Median {
+			if jb.OCR2OracleSpec.PluginType == Median {
 				var cfg medianconfig.PluginConfig
 				err = json.Unmarshal(jb.OCR2OracleSpec.PluginConfig.Bytes(), &cfg)
 				if err != nil {
@@ -293,6 +291,20 @@ func (o *orm) CreateJob(jb *Job, qopts ...pg.QOpt) error {
 				}
 				if err2 := o.AssertBridgesExist(*feePipeline); err2 != nil {
 					return err2
+				}
+			}
+			if jb.OCR2OracleSpec.PluginType == CCIPCommit {
+				var cfg ccipconfig.CommitPluginConfig
+				err := json.Unmarshal(jb.OCR2OracleSpec.PluginConfig.Bytes(), &cfg)
+				if err != nil {
+					return errors.Wrap(err, "failed to parse plugin config")
+				}
+			}
+			if jb.OCR2OracleSpec.PluginType == CCIPExecution {
+				var cfg ccipconfig.ExecutionPluginConfig
+				err := json.Unmarshal(jb.OCR2OracleSpec.PluginConfig.Bytes(), &cfg)
+				if err != nil {
+					return errors.Wrap(err, "failed to parse plugin config")
 				}
 			}
 
@@ -309,9 +321,6 @@ func (o *orm) CreateJob(jb *Job, qopts ...pg.QOpt) error {
 			}
 			jb.OCR2OracleSpecID = &specID
 		case Keeper:
-			if jb.KeeperSpec.EVMChainID == nil {
-				return errors.New("evm chain id must be defined")
-			}
 			var specID int32
 			sql := `INSERT INTO keeper_specs (contract_address, from_address, evm_chain_id, created_at, updated_at)
 			VALUES (:contract_address, :from_address, :evm_chain_id, NOW(), NOW())
@@ -330,9 +339,6 @@ func (o *orm) CreateJob(jb *Job, qopts ...pg.QOpt) error {
 			}
 			jb.CronSpecID = &specID
 		case VRF:
-			if jb.VRFSpec.EVMChainID == nil {
-				return errors.New("evm chain id must be defined")
-			}
 			var specID int32
 			sql := `INSERT INTO vrf_specs (
 				coordinator_address, public_key, min_incoming_confirmations,
@@ -384,21 +390,15 @@ func (o *orm) CreateJob(jb *Job, qopts ...pg.QOpt) error {
 				}
 			}
 		case BlockhashStore:
-			if jb.BlockhashStoreSpec.EVMChainID == nil {
-				return errors.New("evm chain id must be defined")
-			}
 			var specID int32
-			sql := `INSERT INTO blockhash_store_specs (coordinator_v1_address, coordinator_v2_address, coordinator_v2_plus_address, trusted_blockhash_store_address, trusted_blockhash_store_batch_size, wait_blocks, lookback_blocks, heartbeat_period, blockhash_store_address, poll_period, run_timeout, evm_chain_id, from_addresses, created_at, updated_at)
-			VALUES (:coordinator_v1_address, :coordinator_v2_address, :coordinator_v2_plus_address, :trusted_blockhash_store_address, :trusted_blockhash_store_batch_size, :wait_blocks, :lookback_blocks, :heartbeat_period, :blockhash_store_address, :poll_period, :run_timeout, :evm_chain_id, :from_addresses, NOW(), NOW())
+			sql := `INSERT INTO blockhash_store_specs (coordinator_v1_address, coordinator_v2_address, coordinator_v2_plus_address, wait_blocks, lookback_blocks, blockhash_store_address, poll_period, run_timeout, evm_chain_id, from_addresses, created_at, updated_at)
+			VALUES (:coordinator_v1_address, :coordinator_v2_address, :coordinator_v2_plus_address, :wait_blocks, :lookback_blocks, :blockhash_store_address, :poll_period, :run_timeout, :evm_chain_id, :from_addresses, NOW(), NOW())
 			RETURNING id;`
 			if err := pg.PrepareQueryRowx(tx, sql, &specID, toBlockhashStoreSpecRow(jb.BlockhashStoreSpec)); err != nil {
 				return errors.Wrap(err, "failed to create BlockhashStore spec")
 			}
 			jb.BlockhashStoreSpecID = &specID
 		case BlockHeaderFeeder:
-			if jb.BlockHeaderFeederSpec.EVMChainID == nil {
-				return errors.New("evm chain id must be defined")
-			}
 			var specID int32
 			sql := `INSERT INTO block_header_feeder_specs (coordinator_v1_address, coordinator_v2_address, coordinator_v2_plus_address, wait_blocks, lookback_blocks, blockhash_store_address, batch_blockhash_store_address, poll_period, run_timeout, evm_chain_id, from_addresses, get_blockhashes_batch_size, store_blockhashes_batch_size, created_at, updated_at)
 			VALUES (:coordinator_v1_address, :coordinator_v2_address, :coordinator_v2_plus_address, :wait_blocks, :lookback_blocks, :blockhash_store_address, :batch_blockhash_store_address, :poll_period, :run_timeout, :evm_chain_id, :from_addresses,  :get_blockhashes_batch_size, :store_blockhashes_batch_size, NOW(), NOW())
@@ -408,9 +408,6 @@ func (o *orm) CreateJob(jb *Job, qopts ...pg.QOpt) error {
 			}
 			jb.BlockHeaderFeederSpecID = &specID
 		case LegacyGasStationServer:
-			if jb.LegacyGasStationServerSpec.EVMChainID == nil {
-				return errors.New("evm chain id must be defined")
-			}
 			var specID int32
 			sql := `INSERT INTO legacy_gas_station_server_specs (forwarder_address, evm_chain_id, ccip_chain_selector, from_addresses, created_at, updated_at)
 			VALUES (:forwarder_address, :evm_chain_id, :ccip_chain_selector, :from_addresses, NOW(), NOW())
@@ -420,12 +417,9 @@ func (o *orm) CreateJob(jb *Job, qopts ...pg.QOpt) error {
 			}
 			jb.LegacyGasStationServerSpecID = &specID
 		case LegacyGasStationSidecar:
-			if jb.LegacyGasStationSidecarSpec.EVMChainID == nil {
-				return errors.New("evm chain id must be defined")
-			}
 			var specID int32
-			sql := `INSERT INTO legacy_gas_station_sidecar_specs (forwarder_address, off_ramp_address, lookback_blocks, poll_period, run_timeout, evm_chain_id, ccip_chain_selector, created_at, updated_at)
-			VALUES (:forwarder_address, :off_ramp_address, :lookback_blocks, :poll_period, :run_timeout, :evm_chain_id, :ccip_chain_selector, NOW(), NOW())
+			sql := `INSERT INTO legacy_gas_station_sidecar_specs (forwarder_address, off_ramp_address, lookback_blocks, poll_period, run_timeout, evm_chain_id, ccip_chain_selector, status_update_url, created_at, updated_at)
+			VALUES (:forwarder_address, :off_ramp_address, :lookback_blocks, :poll_period, :run_timeout, :evm_chain_id, :ccip_chain_selector, :status_update_url, NOW(), NOW())
 			RETURNING id;`
 			if err := pg.PrepareQueryRowx(tx, sql, &specID, jb.LegacyGasStationSidecarSpec); err != nil {
 				return errors.Wrap(err, "failed to create LegacyGasStationSidecar spec")
@@ -475,34 +469,34 @@ func (o *orm) CreateJob(jb *Job, qopts ...pg.QOpt) error {
 	return o.findJob(jb, "id", jobID, qopts...)
 }
 
-// ValidateKeyStoreMatch confirms that the key has a valid match in the keystore
-func ValidateKeyStoreMatch(spec *OCR2OracleSpec, keyStore keystore.Master, key string) error {
-	if spec.PluginType == types.Mercury {
+// validateKeyStoreMatch confirms that the key has a valid match in the keystore
+func validateKeyStoreMatch(spec *OCR2OracleSpec, keyStore keystore.Master, key string) error {
+	if spec.PluginType == Mercury {
 		_, err := keyStore.CSA().Get(key)
 		if err != nil {
-			return errors.Errorf("no CSA key matching: %q", key)
+			return errors.Wrapf(ErrNoSuchTransmitterKey, "no CSA key matching: %q", key)
 		}
 	} else {
 		switch spec.Relay {
 		case relay.EVM:
 			_, err := keyStore.Eth().Get(key)
 			if err != nil {
-				return errors.Errorf("no EVM key matching: %q", key)
+				return errors.Wrapf(ErrNoSuchTransmitterKey, "no EVM key matching: %q", key)
 			}
 		case relay.Cosmos:
 			_, err := keyStore.Cosmos().Get(key)
 			if err != nil {
-				return errors.Errorf("no Cosmos key matching: %q", key)
+				return errors.Wrapf(ErrNoSuchTransmitterKey, "no Cosmos key matching %q", key)
 			}
 		case relay.Solana:
 			_, err := keyStore.Solana().Get(key)
 			if err != nil {
-				return errors.Errorf("no Solana key matching: %q", key)
+				return errors.Wrapf(ErrNoSuchTransmitterKey, "no Solana key matching: %q", key)
 			}
 		case relay.StarkNet:
 			_, err := keyStore.StarkNet().Get(key)
 			if err != nil {
-				return errors.Errorf("no Starknet key matching: %q", key)
+				return errors.Wrapf(ErrNoSuchTransmitterKey, "no Starknet key matching %q", key)
 			}
 		}
 	}
@@ -517,8 +511,8 @@ func areSendingKeysDefined(jb *Job, keystore keystore.Master) (bool, error) {
 		}
 
 		for _, sendingKey := range sendingKeys {
-			if err = ValidateKeyStoreMatch(jb.OCR2OracleSpec, keystore, sendingKey); err != nil {
-				return false, errors.Wrap(ErrNoSuchSendingKey, err.Error())
+			if err = validateKeyStoreMatch(jb.OCR2OracleSpec, keystore, sendingKey); err != nil {
+				return false, err
 			}
 		}
 
@@ -542,19 +536,19 @@ func (o *orm) InsertJob(job *Job, qopts ...pg.QOpt) error {
 	// if job has id, emplace otherwise insert with a new id.
 	if job.ID == 0 {
 		query = `INSERT INTO jobs (pipeline_spec_id, name, schema_version, type, max_task_duration, ocr_oracle_spec_id, ocr2_oracle_spec_id, direct_request_spec_id, flux_monitor_spec_id,
-				keeper_spec_id, cron_spec_id, vrf_spec_id, webhook_spec_id, blockhash_store_spec_id, bootstrap_spec_id, block_header_feeder_spec_id, gateway_spec_id, 
-                legacy_gas_station_server_spec_id, legacy_gas_station_sidecar_spec_id, external_job_id, gas_limit, forwarding_allowed, created_at)
+				keeper_spec_id, cron_spec_id, vrf_spec_id, webhook_spec_id, blockhash_store_spec_id, bootstrap_spec_id, block_header_feeder_spec_id, legacy_gas_station_server_spec_id, 
+				legacy_gas_station_sidecar_spec_id, gateway_spec_id, external_job_id, gas_limit, forwarding_allowed, created_at)
 		VALUES (:pipeline_spec_id, :name, :schema_version, :type, :max_task_duration, :ocr_oracle_spec_id, :ocr2_oracle_spec_id, :direct_request_spec_id, :flux_monitor_spec_id,
-				:keeper_spec_id, :cron_spec_id, :vrf_spec_id, :webhook_spec_id, :blockhash_store_spec_id, :bootstrap_spec_id, :block_header_feeder_spec_id, :gateway_spec_id, 
-		        :legacy_gas_station_server_spec_id, :legacy_gas_station_sidecar_spec_id, :external_job_id, :gas_limit, :forwarding_allowed, NOW())
+				:keeper_spec_id, :cron_spec_id, :vrf_spec_id, :webhook_spec_id, :blockhash_store_spec_id, :bootstrap_spec_id, :block_header_feeder_spec_id, :legacy_gas_station_server_spec_id, 
+				:legacy_gas_station_sidecar_spec_id, :gateway_spec_id, :external_job_id, :gas_limit, :forwarding_allowed, NOW())
 		RETURNING *;`
 	} else {
 		query = `INSERT INTO jobs (id, pipeline_spec_id, name, schema_version, type, max_task_duration, ocr_oracle_spec_id, ocr2_oracle_spec_id, direct_request_spec_id, flux_monitor_spec_id,
-			keeper_spec_id, cron_spec_id, vrf_spec_id, webhook_spec_id, blockhash_store_spec_id, bootstrap_spec_id, block_header_feeder_spec_id, gateway_spec_id, 
-                  legacy_gas_station_server_spec_id, legacy_gas_station_sidecar_spec_id, external_job_id, gas_limit, forwarding_allowed, created_at)
+			keeper_spec_id, cron_spec_id, vrf_spec_id, webhook_spec_id, blockhash_store_spec_id, bootstrap_spec_id, block_header_feeder_spec_id, legacy_gas_station_server_spec_id, 
+			legacy_gas_station_sidecar_spec_id, gateway_spec_id, external_job_id, gas_limit, forwarding_allowed, created_at)
 		VALUES (:id, :pipeline_spec_id, :name, :schema_version, :type, :max_task_duration, :ocr_oracle_spec_id, :ocr2_oracle_spec_id, :direct_request_spec_id, :flux_monitor_spec_id,
-				:keeper_spec_id, :cron_spec_id, :vrf_spec_id, :webhook_spec_id, :blockhash_store_spec_id, :bootstrap_spec_id, :block_header_feeder_spec_id, :gateway_spec_id, 
-				:legacy_gas_station_server_spec_id, :legacy_gas_station_sidecar_spec_id, :external_job_id, :gas_limit, :forwarding_allowed, NOW())
+				:keeper_spec_id, :cron_spec_id, :vrf_spec_id, :webhook_spec_id, :blockhash_store_spec_id, :bootstrap_spec_id, :block_header_feeder_spec_id, :legacy_gas_station_server_spec_id, 
+			:legacy_gas_station_sidecar_spec_id, :gateway_spec_id, :external_job_id, :gas_limit, :forwarding_allowed, NOW())
 		RETURNING *;`
 	}
 	return q.GetNamed(query, job, job)
@@ -706,7 +700,10 @@ func (o *orm) FindJobs(offset, limit int) (jobs []Job, count int, err error) {
 			return err
 		}
 		for i := range jobs {
-			err = multierr.Combine(err, o.LoadEnvConfigVars(&jobs[i]))
+			err = o.LoadEnvConfigVars(&jobs[i])
+			if err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -715,7 +712,7 @@ func (o *orm) FindJobs(offset, limit int) (jobs []Job, count int, err error) {
 
 func (o *orm) LoadEnvConfigVars(jb *Job) error {
 	if jb.OCROracleSpec != nil {
-		ch, err := o.legacyChains.Get(jb.OCROracleSpec.EVMChainID.String())
+		ch, err := o.chainSet.Get(jb.OCROracleSpec.EVMChainID.ToInt())
 		if err != nil {
 			return err
 		}
@@ -725,13 +722,13 @@ func (o *orm) LoadEnvConfigVars(jb *Job) error {
 		}
 		jb.OCROracleSpec = newSpec
 	} else if jb.VRFSpec != nil {
-		ch, err := o.legacyChains.Get(jb.VRFSpec.EVMChainID.String())
+		ch, err := o.chainSet.Get(jb.VRFSpec.EVMChainID.ToInt())
 		if err != nil {
 			return err
 		}
 		jb.VRFSpec = LoadEnvConfigVarsVRF(ch.Config().EVM(), *jb.VRFSpec)
 	} else if jb.DirectRequestSpec != nil {
-		ch, err := o.legacyChains.Get(jb.DirectRequestSpec.EVMChainID.String())
+		ch, err := o.chainSet.Get(jb.DirectRequestSpec.EVMChainID.ToInt())
 		if err != nil {
 			return err
 		}
@@ -1207,8 +1204,7 @@ func (o *orm) FindJobsByPipelineSpecIDs(ids []int32) ([]Job, error) {
 		}
 		for i := range jbs {
 			err = o.LoadEnvConfigVars(&jbs[i])
-			//We must return the jobs even if the chainID is disabled
-			if err != nil && !errors.Is(err, chains.ErrNoSuchChainID) {
+			if err != nil {
 				return err
 			}
 		}

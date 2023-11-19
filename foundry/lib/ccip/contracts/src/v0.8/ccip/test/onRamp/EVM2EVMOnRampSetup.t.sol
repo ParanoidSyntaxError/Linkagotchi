@@ -15,7 +15,7 @@ contract EVM2EVMOnRampSetup is TokenSetup, PriceRegistrySetup {
   event CCIPSendRequested(Internal.EVM2EVMMessage message);
 
   address internal constant CUSTOM_TOKEN = address(12345);
-  uint224 internal constant CUSTOM_TOKEN_PRICE = 1e17; // $0.1 CUSTOM
+  uint192 internal constant CUSTOM_TOKEN_PRICE = 1e17; // $0.1 CUSTOM
 
   uint256 internal immutable i_tokenAmount0 = 9;
   uint256 internal immutable i_tokenAmount1 = 7;
@@ -32,25 +32,27 @@ contract EVM2EVMOnRampSetup is TokenSetup, PriceRegistrySetup {
     TokenSetup.setUp();
     PriceRegistrySetup.setUp();
 
-    s_priceRegistry.updatePrices(getSingleTokenPriceUpdateStruct(CUSTOM_TOKEN, CUSTOM_TOKEN_PRICE));
+    s_priceRegistry.updatePrices(getSinglePriceUpdateStruct(CUSTOM_TOKEN, CUSTOM_TOKEN_PRICE));
 
     address WETH = s_sourceRouter.getWrappedNative();
 
     s_feeTokenConfigArgs.push(
       EVM2EVMOnRamp.FeeTokenConfigArgs({
         token: s_sourceFeeToken,
-        networkFeeUSDCents: 1_00, // 1 USD
-        gasMultiplierWeiPerEth: 1e18, // 1x
-        premiumMultiplierWeiPerEth: 5e17, // 0.5x
+        networkFeeAmountUSD: 1e10,
+        gasMultiplier: 1e18,
+        destGasOverhead: 100_000,
+        destGasPerPayloadByte: 16,
         enabled: true
       })
     );
     s_feeTokenConfigArgs.push(
       EVM2EVMOnRamp.FeeTokenConfigArgs({
         token: WETH,
-        networkFeeUSDCents: 5_00, // 5 USD
-        gasMultiplierWeiPerEth: 2e18, // 2x
-        premiumMultiplierWeiPerEth: 2e18, // 2x
+        networkFeeAmountUSD: 5e8,
+        gasMultiplier: 2e18,
+        destGasOverhead: 200_000,
+        destGasPerPayloadByte: 16,
         enabled: true
       })
     );
@@ -58,31 +60,25 @@ contract EVM2EVMOnRampSetup is TokenSetup, PriceRegistrySetup {
     s_tokenTransferFeeConfigArgs.push(
       EVM2EVMOnRamp.TokenTransferFeeConfigArgs({
         token: s_sourceFeeToken,
-        minFeeUSDCents: 1_00, // 1 USD
-        maxFeeUSDCents: 1000_00, // 1,000 USD
-        deciBps: 2_5, // 2.5 bps, or 0.025%
-        destGasOverhead: 40_000,
-        destBytesOverhead: 0
+        minFee: 1_00, // $1
+        maxFee: 5000_00, // $5,000
+        ratio: 2_5 // 2.5 bps, or 0.025%
       })
     );
     s_tokenTransferFeeConfigArgs.push(
       EVM2EVMOnRamp.TokenTransferFeeConfigArgs({
         token: s_sourceRouter.getWrappedNative(),
-        minFeeUSDCents: 50, // 0.5 USD
-        maxFeeUSDCents: 500_00, // 500 USD
-        deciBps: 5_0, // 5 bps, or 0.05%
-        destGasOverhead: 10_000,
-        destBytesOverhead: 100
+        minFee: 2_00, // $2
+        maxFee: 10_000_00, // $10,000
+        ratio: 5_0 // 5 bps, or 0.05%
       })
     );
     s_tokenTransferFeeConfigArgs.push(
       EVM2EVMOnRamp.TokenTransferFeeConfigArgs({
         token: CUSTOM_TOKEN,
-        minFeeUSDCents: 2_00, // 1 USD
-        maxFeeUSDCents: 2000_00, // 1,000 USD
-        deciBps: 10_0, // 10 bps, or 0.1%
-        destGasOverhead: 1,
-        destBytesOverhead: 200
+        minFee: 3_00, // $3
+        maxFee: 15_000_00, // $15,000
+        ratio: 10_0 // 10 bps, or 0.1%
       })
     );
 
@@ -98,6 +94,7 @@ contract EVM2EVMOnRampSetup is TokenSetup, PriceRegistrySetup {
       }),
       generateDynamicOnRampConfig(address(s_sourceRouter), address(s_priceRegistry)),
       getTokensAndPools(s_sourceTokens, getCastedSourcePools()),
+      new address[](0),
       rateLimiterConfig(),
       s_feeTokenConfigArgs,
       s_tokenTransferFeeConfigArgs,
@@ -141,7 +138,7 @@ contract EVM2EVMOnRampSetup is TokenSetup, PriceRegistrySetup {
         data: "",
         tokenAmounts: tokenAmounts,
         feeToken: s_sourceFeeToken,
-        extraArgs: Client._argsToBytes(Client.EVMExtraArgsV1({gasLimit: GAS_LIMIT}))
+        extraArgs: Client._argsToBytes(Client.EVMExtraArgsV1({gasLimit: GAS_LIMIT, strict: false}))
       });
   }
 
@@ -158,7 +155,7 @@ contract EVM2EVMOnRampSetup is TokenSetup, PriceRegistrySetup {
         data: "",
         tokenAmounts: tokenAmounts,
         feeToken: s_sourceFeeToken,
-        extraArgs: Client._argsToBytes(Client.EVMExtraArgsV1({gasLimit: GAS_LIMIT}))
+        extraArgs: Client._argsToBytes(Client.EVMExtraArgsV1({gasLimit: GAS_LIMIT, strict: false}))
       });
   }
 
@@ -169,7 +166,7 @@ contract EVM2EVMOnRampSetup is TokenSetup, PriceRegistrySetup {
         data: "",
         tokenAmounts: new Client.EVMTokenAmount[](0),
         feeToken: s_sourceFeeToken,
-        extraArgs: Client._argsToBytes(Client.EVMExtraArgsV1({gasLimit: GAS_LIMIT}))
+        extraArgs: Client._argsToBytes(Client.EVMExtraArgsV1({gasLimit: GAS_LIMIT, strict: false}))
       });
   }
 
@@ -192,12 +189,11 @@ contract EVM2EVMOnRampSetup is TokenSetup, PriceRegistrySetup {
       sender: originalSender,
       nonce: nonce,
       gasLimit: extraArgs.gasLimit,
-      strict: false,
+      strict: extraArgs.strict,
       sourceChainSelector: SOURCE_CHAIN_ID,
       receiver: abi.decode(message.receiver, (address)),
       data: message.data,
       tokenAmounts: message.tokenAmounts,
-      sourceTokenData: new bytes[](message.tokenAmounts.length),
       feeToken: message.feeToken,
       messageId: ""
     });

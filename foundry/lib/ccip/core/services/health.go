@@ -21,7 +21,7 @@ type (
 	// Checker provides a service which can be probed for system health.
 	Checker interface {
 		// Register a service for health checks.
-		Register(service Checkable) error
+		Register(name string, service Checkable) error
 		// Unregister a service.
 		Unregister(name string) error
 		// IsReady returns the current readiness of the system.
@@ -176,9 +176,8 @@ func (c *checker) update() {
 	uptimeSeconds.Add(interval.Seconds())
 }
 
-func (c *checker) Register(service Checkable) error {
-	name := service.Name()
-	if name == "" {
+func (c *checker) Register(name string, service Checkable) error {
+	if service == nil || name == "" {
 		return errors.Errorf("misconfigured check %#v for %v", name, service)
 	}
 
@@ -253,7 +252,11 @@ func (i *InBackupHealthReport) Stop() {
 func (i *InBackupHealthReport) Start() {
 	go func() {
 		http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusNoContent)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, err := w.Write([]byte("Database backup in progress..."))
+			if err != nil {
+				i.lggr.Errorf("Cannot write response to /health")
+			}
 		})
 		i.lggr.Info("Starting InBackupHealthReport")
 		if err := i.server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {

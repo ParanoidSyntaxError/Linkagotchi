@@ -21,13 +21,13 @@ const (
 )
 
 func main() {
-	s := plugins.MustNewStartedServer(loggerName)
+	s := plugins.StartServer(loggerName)
 	defer s.Stop()
 
 	p := &pluginRelayer{Base: plugins.Base{Logger: s.Logger}}
 	defer s.Logger.ErrorIfFn(p.Close, "Failed to close")
 
-	s.MustRegister(p)
+	s.MustRegister(p.Name(), p)
 
 	stopCh := make(chan struct{})
 	defer close(stopCh)
@@ -56,22 +56,21 @@ func (c *pluginRelayer) NewRelayer(ctx context.Context, config string, keystore 
 	d := toml.NewDecoder(strings.NewReader(config))
 	d.DisallowUnknownFields()
 	var cfg struct {
-		Solana solana.SolanaConfig
+		Solana solana.SolanaConfigs
 	}
-
 	if err := d.Decode(&cfg); err != nil {
-		return nil, fmt.Errorf("failed to decode config toml: %w:\n\t%s", err, config)
+		return nil, fmt.Errorf("failed to decode config toml: %w", err)
 	}
 
-	opts := solana.ChainOpts{
+	chainSet, err := solana.NewChainSet(solana.ChainSetOpts{
 		Logger:   c.Logger,
 		KeyStore: keystore,
-	}
-	chain, err := solana.NewChain(&cfg.Solana, opts)
+		Configs:  solana.NewConfigs(cfg.Solana),
+	}, cfg.Solana)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create chain: %w", err)
 	}
-	ra := relay.NewRelayerAdapter(pkgsol.NewRelayer(c.Logger, chain), chain)
+	ra := relay.NewRelayerAdapter(pkgsol.NewRelayer(c.Logger, chainSet), chainSet)
 
 	c.SubService(ra)
 

@@ -7,10 +7,9 @@ import {IERC677} from "./IERC677.sol";
 import {ERC677} from "./ERC677.sol";
 import {OwnerIsCreator} from "../../access/OwnerIsCreator.sol";
 
-import {ERC20Burnable} from "../../../vendor/openzeppelin-solidity/v4.8.0/contracts/token/ERC20/extensions/ERC20Burnable.sol";
-import {EnumerableSet} from "../../../vendor/openzeppelin-solidity/v4.8.0/contracts/utils/structs/EnumerableSet.sol";
-import {IERC165} from "../../../vendor/openzeppelin-solidity/v4.8.0/contracts/utils/introspection/IERC165.sol";
-import {IERC20} from "../../../vendor/openzeppelin-solidity/v4.8.0/contracts/token/ERC20/IERC20.sol";
+import {ERC20Burnable} from "../../../vendor/openzeppelin-solidity/v4.8.0/token/ERC20/extensions/ERC20Burnable.sol";
+import {EnumerableSet} from "../../../vendor/openzeppelin-solidity/v4.8.0/utils/structs/EnumerableSet.sol";
+import {IERC165} from "../../../vendor/openzeppelin-solidity/v4.8.0/utils/introspection/IERC165.sol";
 
 /// @notice A basic ERC677 compatible token contract with burn and minting roles.
 /// @dev The total supply can be limited during deployment.
@@ -44,7 +43,6 @@ contract BurnMintERC677 is IBurnMintERC20, ERC677, IERC165, ERC20Burnable, Owner
 
   function supportsInterface(bytes4 interfaceId) public pure virtual override returns (bool) {
     return
-      interfaceId == type(IERC20).interfaceId ||
       interfaceId == type(IERC677).interfaceId ||
       interfaceId == type(IBurnMintERC20).interfaceId ||
       interfaceId == type(IERC165).interfaceId;
@@ -88,8 +86,7 @@ contract BurnMintERC677 is IBurnMintERC20, ERC677, IERC165, ERC20Burnable, Owner
 
   /// @notice Check if recipient is valid (not this contract address).
   /// @param recipient the account we transfer/approve to.
-  /// @dev Reverts with an empty revert to be compatible with the existing link token when
-  /// the recipient is this contract address.
+  /// @dev Reverts with an empty revert to be compatible with the existing link token.
   modifier validAddress(address recipient) virtual {
     if (recipient == address(this)) revert();
     _;

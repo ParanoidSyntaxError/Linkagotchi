@@ -15,15 +15,16 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/test-go/testify/assert"
 
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/ccip/generated/evm_2_evm_onramp"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/ccip/generated/router"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/internal/ccipdata"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/evm_2_evm_onramp"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/router"
+	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/abihelpers"
+	ccipconfig "github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/config"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/testhelpers"
 	integrationtesthelpers "github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/testhelpers/integration"
 )
 
 func TestIntegration_CCIP(t *testing.T) {
-	ccipTH := integrationtesthelpers.SetupCCIPIntegrationTH(t, testhelpers.SourceChainID, testhelpers.SourceChainSelector, testhelpers.DestChainID, testhelpers.DestChainSelector)
+	ccipTH := integrationtesthelpers.SetupCCIPIntegrationTH(t, testhelpers.SourceChainID, testhelpers.DestChainID)
 	linkUSD := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, err := w.Write([]byte(`{"UsdPerLink": "8000000000000000000"}`))
 		require.NoError(t, err)
@@ -32,8 +33,8 @@ func TestIntegration_CCIP(t *testing.T) {
 		_, err := w.Write([]byte(`{"UsdPerETH": "1700000000000000000000"}`))
 		require.NoError(t, err)
 	}))
-	wrapped, err1 := ccipTH.Source.Router.GetWrappedNative(nil)
-	require.NoError(t, err1)
+	wrapped, err := ccipTH.Source.Router.GetWrappedNative(nil)
+	require.NoError(t, err)
 	tokenPricesUSDPipeline := fmt.Sprintf(`
 // Price 1
 link [type=http method=GET url="%s"];
@@ -84,7 +85,7 @@ merge [type=merge left="{}" right="{\\\"%s\\\":$(link_parse), \\\"%s\\\":$(eth_p
 			FeeToken:  ccipTH.Source.LinkToken.Address(),
 			ExtraArgs: extraArgs,
 		}
-		fee, err2 := ccipTH.Source.Router.GetFee(nil, testhelpers.DestChainSelector, msg)
+		fee, err2 := ccipTH.Source.Router.GetFee(nil, testhelpers.DestChainID, msg)
 		require.NoError(t, err2)
 		// Currently no overhead and 10gwei dest gas price. So fee is simply (gasLimit * gasPrice)* link/native
 		// require.Equal(t, new(big.Int).Mul(gasLimit, gasPrice).String(), fee.String())
@@ -99,7 +100,7 @@ merge [type=merge left="{}" right="{\\\"%s\\\":$(link_parse), \\\"%s\\\":$(eth_p
 
 		executionLogs := ccipTH.AllNodesHaveExecutedSeqNums(t, currentSeqNum, currentSeqNum)
 		assert.Len(t, executionLogs, 1)
-		ccipTH.AssertExecState(t, executionLogs[0], testhelpers.ExecutionStateSuccess)
+		ccipTH.AssertExecState(t, executionLogs[0], abihelpers.ExecutionStateSuccess)
 
 		// Asserts
 		// 1) The total pool input == total pool output
@@ -182,14 +183,14 @@ merge [type=merge left="{}" right="{\\\"%s\\\":$(link_parse), \\\"%s\\\":$(eth_p
 				FeeToken:  ccipTH.Source.LinkToken.Address(),
 				ExtraArgs: extraArgs,
 			}
-			fee, err2 := ccipTH.Source.Router.GetFee(nil, testhelpers.DestChainSelector, msg)
+			fee, err2 := ccipTH.Source.Router.GetFee(nil, testhelpers.DestChainID, msg)
 			require.NoError(t, err2)
 			// Currently no overhead and 1gwei dest gas price. So fee is simply gasLimit * gasPrice.
 			// require.Equal(t, new(big.Int).Mul(txGasLimit, gasPrice).String(), fee.String())
 			// Approve the fee amount + the token amount
 			_, err2 = ccipTH.Source.LinkToken.Approve(ccipTH.Source.User, ccipTH.Source.Router.Address(), new(big.Int).Add(fee, tokenAmount))
 			require.NoError(t, err2)
-			tx, err2 := ccipTH.Source.Router.CcipSend(ccipTH.Source.User, ccipTH.Dest.ChainSelector, msg)
+			tx, err2 := ccipTH.Source.Router.CcipSend(ccipTH.Source.User, ccipTH.Dest.ChainID, msg)
 			require.NoError(t, err2)
 			txs = append(txs, tx)
 		}
@@ -204,10 +205,86 @@ merge [type=merge left="{}" right="{\\\"%s\\\":$(link_parse), \\\"%s\\\":$(eth_p
 		// Should all be executed
 		executionLogs := ccipTH.AllNodesHaveExecutedSeqNums(t, currentSeqNum, currentSeqNum+n-1)
 		for _, execLog := range executionLogs {
-			ccipTH.AssertExecState(t, execLog, testhelpers.ExecutionStateSuccess)
+			ccipTH.AssertExecState(t, execLog, abihelpers.ExecutionStateSuccess)
 		}
 
 		currentSeqNum += n
+	})
+
+	t.Run("strict sequencing", func(t *testing.T) {
+		// approve the total amount to be sent
+		// set revert to true so that the execution gets reverted
+		_, err = ccipTH.Dest.Receivers[1].Receiver.SetRevert(ccipTH.Dest.User, true)
+		require.NoError(t, err, "setting revert to true on the receiver")
+		ccipTH.Dest.Chain.Commit()
+		currentBlockNumber := ccipTH.Dest.Chain.Blockchain().CurrentBlock().Number.Uint64()
+
+		// Test sequence:
+		// Send msg1: strict reverts
+		// Send msg2, msg3: blocked on manual exec
+		// Execute msg1 manually.
+		// msg2 and msg2 should go through.
+		totalMsgs := 2
+		extraArgs, err2 := testhelpers.GetEVMExtraArgsV1(big.NewInt(200_000), true)
+		require.NoError(t, err2)
+		startNonce, err2 := ccipTH.Dest.OffRamp.GetSenderNonce(nil, ccipTH.Source.User.From)
+		require.NoError(t, err2)
+		msg := router.ClientEVM2AnyMessage{
+			Receiver:     testhelpers.MustEncodeAddress(t, ccipTH.Dest.Receivers[1].Receiver.Address()),
+			Data:         []byte("hello"),
+			TokenAmounts: []router.ClientEVMTokenAmount{},
+			FeeToken:     ccipTH.Source.LinkToken.Address(),
+			ExtraArgs:    extraArgs,
+		}
+		fee, err2 := ccipTH.Source.Router.GetFee(nil, testhelpers.DestChainID, msg)
+		require.NoError(t, err2)
+		// Approve the fee amount
+		_, err2 = ccipTH.Source.LinkToken.Approve(ccipTH.Source.User, ccipTH.Source.Router.Address(), big.NewInt(0).Mul(big.NewInt(int64(totalMsgs)), fee))
+		require.NoError(t, err2)
+		ccipTH.Source.Chain.Commit()
+		txForFailedReq := ccipTH.SendRequest(t, msg)
+		failedReqLog := ccipTH.AllNodesHaveReqSeqNum(t, currentSeqNum)
+		ccipTH.EventuallyReportCommitted(t, currentSeqNum)
+		ccipTH.EventuallyCommitReportAccepted(t, currentBlockNumber)
+
+		// execution status should be failed
+		executionLogs := ccipTH.AllNodesHaveExecutedSeqNums(t, currentSeqNum, currentSeqNum)
+		assert.Len(t, executionLogs, 1)
+		ccipTH.AssertExecState(t, executionLogs[0], abihelpers.ExecutionStateFailure)
+		// Nonce should not have incremented
+		afterNonce, err2 := ccipTH.Dest.OffRamp.GetSenderNonce(nil, ccipTH.Source.User.From)
+		require.NoError(t, err2)
+		require.Equal(t, startNonce, afterNonce)
+		currentSeqNum++
+
+		// flip the revert settings on receiver
+		_, err2 = ccipTH.Dest.Receivers[1].Receiver.SetRevert(ccipTH.Dest.User, false)
+		require.NoError(t, err2, "setting revert to false on the receiver")
+		ccipTH.Dest.Chain.Commit()
+		ccipTH.Source.Chain.Commit()
+
+		// subsequent requests which should not be executed.
+		var pendingReqNumbers []int
+		for i := 1; i < totalMsgs; i++ {
+			ccipTH.SendRequest(t, msg)
+			ccipTH.AllNodesHaveReqSeqNum(t, currentSeqNum)
+			ccipTH.EventuallyReportCommitted(t, currentSeqNum)
+			executionLog := ccipTH.NoNodesHaveExecutedSeqNum(t, currentSeqNum)
+			require.Empty(t, executionLog)
+			pendingReqNumbers = append(pendingReqNumbers, currentSeqNum)
+			currentSeqNum++
+		}
+
+		// manually execute the failed request
+		failedSeqNum := ccipTH.ExecuteMessage(t, failedReqLog, txForFailedReq.Hash(), currentBlockNumber)
+		currentBlockNumber = ccipTH.Dest.Chain.Blockchain().CurrentBlock().Number.Uint64()
+		ccipTH.EventuallyExecutionStateChangedToSuccess(t, []uint64{failedSeqNum}, currentBlockNumber)
+
+		// verify all the pending requests should be successfully executed now
+		for _, seqNo := range pendingReqNumbers {
+			t.Logf("Verify execution for pending seqNum %d", seqNo)
+			ccipTH.EventuallyExecutionStateChangedToSuccess(t, []uint64{uint64(seqNo)}, 1)
+		}
 	})
 
 	// Deploy new on ramp,Commit store,off ramp
@@ -236,7 +313,7 @@ merge [type=merge left="{}" right="{\\\"%s\\\":$(link_parse), \\\"%s\\\":$(eth_p
 		ccipTH.AllNodesHaveReqSeqNum(t, currentSeqNum, onRampV1.Address())
 		ccipTH.EventuallyReportCommitted(t, currentSeqNum, commitStoreV1.Address())
 		executionLog := ccipTH.AllNodesHaveExecutedSeqNums(t, currentSeqNum, currentSeqNum, offRampV1.Address())
-		ccipTH.AssertExecState(t, executionLog[0], testhelpers.ExecutionStateSuccess, offRampV1.Address())
+		ccipTH.AssertExecState(t, executionLog[0], abihelpers.ExecutionStateSuccess, offRampV1.Address())
 
 		nonceAtOnRampV1, err := onRampV1.GetSenderNonce(nil, ccipTH.Source.User.From)
 		require.NoError(t, err, "getting nonce from onRamp")
@@ -309,7 +386,7 @@ merge [type=merge left="{}" right="{\\\"%s\\\":$(link_parse), \\\"%s\\\":$(eth_p
 		linkToTransferToOnRamp := big.NewInt(1e18)
 
 		// transfer some link to onramp to pay the nops
-		_, err := ccipTH.Source.LinkToken.Transfer(ccipTH.Source.User, ccipTH.Source.OnRamp.Address(), linkToTransferToOnRamp)
+		_, err = ccipTH.Source.LinkToken.Transfer(ccipTH.Source.User, ccipTH.Source.OnRamp.Address(), linkToTransferToOnRamp)
 		require.NoError(t, err)
 		ccipTH.Source.Chain.Commit()
 
@@ -371,7 +448,7 @@ merge [type=merge left="{}" right="{\\\"%s\\\":$(link_parse), \\\"%s\\\":$(eth_p
 			ExtraArgs:    extraArgs,
 			FeeToken:     common.Address{},
 		}
-		fee, err := ccipTH.Source.Router.GetFee(nil, testhelpers.DestChainSelector, msg)
+		fee, err := ccipTH.Source.Router.GetFee(nil, testhelpers.DestChainID, msg)
 		require.NoError(t, err)
 
 		// verify message is sent
@@ -383,7 +460,7 @@ merge [type=merge left="{}" right="{\\\"%s\\\":$(link_parse), \\\"%s\\\":$(eth_p
 
 		executionLogs := ccipTH.AllNodesHaveExecutedSeqNums(t, currentSeqNum, currentSeqNum)
 		assert.Len(t, executionLogs, 1)
-		ccipTH.AssertExecState(t, executionLogs[0], testhelpers.ExecutionStateSuccess)
+		ccipTH.AssertExecState(t, executionLogs[0], abihelpers.ExecutionStateSuccess)
 		currentSeqNum++
 
 		// get the nop fee
@@ -476,13 +553,15 @@ merge [type=merge left="{}" right="{\\\"%s\\\":$(link_parse), \\\"%s\\\":$(eth_p
 			seqNumber := currentSeqNum + 1
 			defer msgWg.Done()
 			for {
-				<-ticker.C // wait for ticker
-				t.Logf("sending request for seqnum %d", seqNumber)
-				ccipContracts.SendMessage(t, gasLimit, tokenAmount, ccipTH.Dest.Receivers[0].Receiver.Address())
-				ccipContracts.Source.Chain.Commit()
-				seqNumber++
-				if seqNumber == endSeq {
-					return
+				select {
+				case <-ticker.C:
+					t.Logf("sending request for seqnum %d", seqNumber)
+					ccipContracts.SendMessage(t, gasLimit, tokenAmount, ccipTH.Dest.Receivers[0].Receiver.Address())
+					ccipContracts.Source.Chain.Commit()
+					seqNumber++
+					if seqNumber == endSeq {
+						return
+					}
 				}
 			}
 		}(ccipTH.CCIPContracts, currentSeqNum)
@@ -503,21 +582,20 @@ merge [type=merge left="{}" right="{\\\"%s\\\":$(link_parse), \\\"%s\\\":$(eth_p
 
 			executionLogs := ccipTH.AllNodesHaveExecutedSeqNums(t, i, i)
 			assert.Len(t, executionLogs, 1)
-			ccipTH.AssertExecState(t, executionLogs[0], testhelpers.ExecutionStateSuccess)
+			ccipTH.AssertExecState(t, executionLogs[0], abihelpers.ExecutionStateSuccess)
 		}
 
 		for i, node := range ccipTH.Nodes {
 			t.Logf("verifying node %d", i)
-			node.EventuallyNodeUsesNewCommitConfig(t, ccipTH, ccipdata.CommitOnchainConfig{
+			node.EventuallyNodeUsesNewCommitConfig(t, ccipTH, ccipconfig.CommitOnchainConfig{
 				PriceRegistry: ccipTH.Dest.PriceRegistry.Address(),
 			})
-			node.EventuallyNodeUsesNewExecConfig(t, ccipTH, ccipdata.ExecOnchainConfigV1_2_0{
+			node.EventuallyNodeUsesNewExecConfig(t, ccipTH, ccipconfig.ExecOnchainConfig{
 				PermissionLessExecutionThresholdSeconds: testhelpers.PermissionLessExecutionThresholdSeconds,
 				Router:                                  ccipTH.Dest.Router.Address(),
 				PriceRegistry:                           ccipTH.Dest.PriceRegistry.Address(),
-				MaxDataBytes:                            1e5,
-				MaxNumberOfTokensPerMsg:                 5,
-				MaxPoolReleaseOrMintGas:                 200_000,
+				MaxDataSize:                             1e5,
+				MaxTokensLength:                         5,
 			})
 			node.EventuallyNodeUsesUpdatedPriceRegistry(t, ccipTH)
 		}

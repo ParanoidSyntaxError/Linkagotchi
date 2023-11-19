@@ -24,10 +24,9 @@ contract EVM2EVMOffRampHelper is EVM2EVMOffRamp, IgnoreContractSize {
     Client.EVMTokenAmount[] memory sourceTokenAmounts,
     bytes calldata originalSender,
     address receiver,
-    bytes[] calldata sourceTokenData,
     bytes[] calldata offchainTokenData
   ) external returns (Client.EVMTokenAmount[] memory) {
-    return _releaseOrMintTokens(sourceTokenAmounts, originalSender, receiver, sourceTokenData, offchainTokenData);
+    return _releaseOrMintTokens(sourceTokenAmounts, originalSender, receiver, offchainTokenData);
   }
 
   function trialExecute(

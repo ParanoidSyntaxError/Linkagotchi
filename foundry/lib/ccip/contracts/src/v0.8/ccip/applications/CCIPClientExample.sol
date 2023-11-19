@@ -2,12 +2,14 @@
 pragma solidity ^0.8.0;
 
 import {IRouterClient} from "../interfaces/IRouterClient.sol";
+import {IAny2EVMMessageReceiver} from "../interfaces/IAny2EVMMessageReceiver.sol";
 
 import {Client} from "../libraries/Client.sol";
 import {CCIPReceiver} from "./CCIPReceiver.sol";
 import {OwnerIsCreator} from "../../shared/access/OwnerIsCreator.sol";
 
-import {IERC20} from "../../vendor/openzeppelin-solidity/v4.8.0/contracts/token/ERC20/IERC20.sol";
+import {IERC165} from "../../vendor/openzeppelin-solidity/v4.8.0/utils/introspection/IERC165.sol";
+import {IERC20} from "../../vendor/openzeppelin-solidity/v4.8.0/token/ERC20/IERC20.sol";
 
 // @notice Example of a client which supports EVM/non-EVM chains
 // @dev If chain specific logic is required for different chain families (e.g. particular
@@ -35,10 +37,10 @@ contract CCIPClientExample is CCIPReceiver, OwnerIsCreator {
   // upgrading the dapp. Note that extra args are chain family specific (e.g. gasLimit is EVM specific etc.).
   // and will always be backwards compatible i.e. upgrades are opt-in.
   // Offchain we can compute the V1 extraArgs:
-  //    Client.EVMExtraArgsV1 memory extraArgs = Client.EVMExtraArgsV1({gasLimit: 300_000});
+  //    Client.EVMExtraArgsV1 memory extraArgs = Client.EVMExtraArgsV1({gasLimit: 300_000, strict: false});
   //    bytes memory encodedV1ExtraArgs = Client._argsToBytes(extraArgs);
   // Then later compute V2 extraArgs, for example if a refund feature was added:
-  //    Client.EVMExtraArgsV2 memory extraArgs = Client.EVMExtraArgsV2({gasLimit: 300_000, destRefundAddress: 0x1234});
+  //    Client.EVMExtraArgsV2 memory extraArgs = Client.EVMExtraArgsV2({gasLimit: 300_000, strict: false, destRefundAddress: 0x1234});
   //    bytes memory encodedV2ExtraArgs = Client._argsToBytes(extraArgs);
   // and update storage with the new args.
   // If different options are required for different messages, for example different gas limits,

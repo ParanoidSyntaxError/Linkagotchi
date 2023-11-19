@@ -39,17 +39,23 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/utils"
 )
 
-func logRuntime(t testing.TB, start time.Time) {
+func logRuntime(t *testing.T, start time.Time) {
 	t.Log("runtime", time.Since(start))
 }
 
-func populateDatabase(t testing.TB, o *logpoller.DbORM, chainID *big.Int) (common.Hash, common.Address, common.Address) {
+func TestPopulateLoadedDB(t *testing.T) {
+	t.Skip("Only for local load testing and query analysis")
+	lggr := logger.TestLogger(t)
+	_, db := heavyweight.FullTestDBV2(t, "logs_scale", nil)
+	chainID := big.NewInt(137)
+
+	o := logpoller.NewORM(big.NewInt(137), db, lggr, pgtest.NewQConfig(true))
 	event1 := EmitterABI.Events["Log1"].ID
 	address1 := common.HexToAddress("0x2ab9a2Dc53736b361b72d900CdF9F78F9406fbbb")
 	address2 := common.HexToAddress("0x6E225058950f237371261C985Db6bDe26df2200E")
-	startDate := time.Date(2010, 1, 1, 12, 12, 12, 0, time.UTC)
 
-	for j := 1; j < 100; j++ {
+	// We start at 1 just so block number > 0
+	for j := 1; j < 1000; j++ {
 		var logs []logpoller.Log
 		// Max we can insert per batch
 		for i := 0; i < 1000; i++ {
@@ -57,60 +63,23 @@ func populateDatabase(t testing.TB, o *logpoller.DbORM, chainID *big.Int) (commo
 			if (i+(1000*j))%2 == 0 {
 				addr = address2
 			}
-			blockNumber := int64(i + (1000 * j))
-			blockTimestamp := startDate.Add(time.Duration(j*1000) * time.Hour)
-
 			logs = append(logs, logpoller.Log{
-				EvmChainId:     utils.NewBig(chainID),
-				LogIndex:       1,
-				BlockHash:      common.HexToHash(fmt.Sprintf("0x%d", i+(1000*j))),
-				BlockNumber:    blockNumber,
-				BlockTimestamp: blockTimestamp,
-				EventSig:       event1,
-				Topics:         [][]byte{event1[:], logpoller.EvmWord(uint64(i + 1000*j)).Bytes()},
-				Address:        addr,
-				TxHash:         utils.RandomAddress().Hash(),
-				Data:           logpoller.EvmWord(uint64(i + 1000*j)).Bytes(),
-				CreatedAt:      blockTimestamp,
+				EvmChainId:  utils.NewBig(chainID),
+				LogIndex:    1,
+				BlockHash:   common.HexToHash(fmt.Sprintf("0x%d", i+(1000*j))),
+				BlockNumber: int64(i + (1000 * j)),
+				EventSig:    event1,
+				Topics:      [][]byte{event1[:], logpoller.EvmWord(uint64(i + 1000*j)).Bytes()},
+				Address:     addr,
+				TxHash:      common.HexToHash("0x1234"),
+				Data:        logpoller.EvmWord(uint64(i + 1000*j)).Bytes(),
 			})
-
 		}
 		require.NoError(t, o.InsertLogs(logs))
-		require.NoError(t, o.InsertBlock(utils.RandomAddress().Hash(), int64((j+1)*1000-1), startDate.Add(time.Duration(j*1000)*time.Hour)))
 	}
-
-	return event1, address1, address2
-}
-
-func BenchmarkSelectLogsCreatedAfter(b *testing.B) {
-	chainId := big.NewInt(137)
-	_, db := heavyweight.FullTestDBV2(b, "logs_scale", nil)
-	o := logpoller.NewORM(chainId, db, logger.TestLogger(b), pgtest.NewQConfig(false))
-	event, address, _ := populateDatabase(b, o, chainId)
-
-	// Setting searchDate to pick around 5k logs
-	searchDate := time.Date(2020, 1, 1, 12, 12, 12, 0, time.UTC)
-
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		logs, err := o.SelectLogsCreatedAfter(address, event, searchDate, 500)
-		require.NotZero(b, len(logs))
-		require.NoError(b, err)
-	}
-}
-
-func TestPopulateLoadedDB(t *testing.T) {
-	t.Skip("Only for local load testing and query analysis")
-	_, db := heavyweight.FullTestDBV2(t, "logs_scale", nil)
-	chainID := big.NewInt(137)
-
-	o := logpoller.NewORM(big.NewInt(137), db, logger.TestLogger(t), pgtest.NewQConfig(true))
-	event1, address1, address2 := populateDatabase(t, o, chainID)
-
 	func() {
 		defer logRuntime(t, time.Now())
-		_, err1 := o.SelectLogs(750000, 800000, address1, event1)
+		_, err1 := o.SelectLogsByBlockRangeFilter(750000, 800000, address1, event1)
 		require.NoError(t, err1)
 	}()
 	func() {
@@ -123,7 +92,7 @@ func TestPopulateLoadedDB(t *testing.T) {
 	require.NoError(t, o.InsertBlock(common.HexToHash("0x10"), 1000000, time.Now()))
 	func() {
 		defer logRuntime(t, time.Now())
-		lgs, err1 := o.SelectLogsDataWordRange(address1, event1, 0, logpoller.EvmWord(500000), logpoller.EvmWord(500020), 0)
+		lgs, err1 := o.SelectDataWordRange(address1, event1, 0, logpoller.EvmWord(500000), logpoller.EvmWord(500020), 0)
 		require.NoError(t, err1)
 		// 10 since every other log is for address1
 		assert.Equal(t, 10, len(lgs))
@@ -138,7 +107,7 @@ func TestPopulateLoadedDB(t *testing.T) {
 
 	func() {
 		defer logRuntime(t, time.Now())
-		lgs, err1 := o.SelectIndexedLogsTopicRange(address1, event1, 1, logpoller.EvmWord(500000), logpoller.EvmWord(500020), 0)
+		lgs, err1 := o.SelectIndexLogsTopicRange(address1, event1, 1, logpoller.EvmWord(500000), logpoller.EvmWord(500020), 0)
 		require.NoError(t, err1)
 		assert.Equal(t, 10, len(lgs))
 	}()
@@ -247,10 +216,9 @@ func Test_BackupLogPoller(t *testing.T) {
 	require.Equal(t, 1, len(filters))
 	require.Equal(t, filter1, filters["filter1"])
 
-	err = th.LogPoller.RegisterFilter(
-		logpoller.Filter{"filter2",
-			[]common.Hash{EmitterABI.Events["Log1"].ID},
-			[]common.Address{th.EmitterAddress2}, 0})
+	err = th.LogPoller.RegisterFilter(logpoller.Filter{"filter2",
+		[]common.Hash{EmitterABI.Events["Log1"].ID},
+		[]common.Address{th.EmitterAddress2}, 0})
 	require.NoError(t, err)
 
 	defer func() {
@@ -791,13 +759,6 @@ func TestLogPoller_LoadFilters(t *testing.T) {
 	require.True(t, ok)
 	assert.True(t, filter.Contains(&filter3))
 	assert.True(t, filter3.Contains(&filter))
-
-	t.Run("HasFilter", func(t *testing.T) {
-		assert.True(t, th.LogPoller.HasFilter("first Filter"))
-		assert.True(t, th.LogPoller.HasFilter("second Filter"))
-		assert.True(t, th.LogPoller.HasFilter("third Filter"))
-		assert.False(t, th.LogPoller.HasFilter("fourth Filter"))
-	})
 }
 
 func TestLogPoller_GetBlocks_Range(t *testing.T) {
@@ -805,8 +766,7 @@ func TestLogPoller_GetBlocks_Range(t *testing.T) {
 	th := SetupTH(t, 2, 3, 2)
 
 	err := th.LogPoller.RegisterFilter(logpoller.Filter{"GetBlocks Test", []common.Hash{
-		EmitterABI.Events["Log1"].ID, EmitterABI.Events["Log2"].ID}, []common.Address{th.EmitterAddress1, th.EmitterAddress2}, 0},
-	)
+		EmitterABI.Events["Log1"].ID, EmitterABI.Events["Log2"].ID}, []common.Address{th.EmitterAddress1, th.EmitterAddress2}, 0})
 	require.NoError(t, err)
 
 	// LP retrieves 0 blocks
@@ -1136,6 +1096,8 @@ func TestTooManyLogResults(t *testing.T) {
 			return []types.Log{}, nil // succeed when single block requested
 		}
 		return []types.Log{}, &clientErr // return "too many results" error if block range spans 4 or more blocks
+
+		return logs, err
 	})
 
 	lp.PollAndSaveLogs(ctx, 298)
@@ -1151,64 +1113,4 @@ func TestTooManyLogResults(t *testing.T) {
 
 	require.Len(t, crit, 1)
 	assert.Contains(t, crit[0].Message, "Too many log results in a single block")
-}
-
-func Test_CreatedAfterQueriesWithBackfill(t *testing.T) {
-	emittedLogs := 60
-	finalityDepth := 10
-	ctx := testutils.Context(t)
-	th := SetupTH(t, int64(finalityDepth), 3, 2)
-
-	header, err := th.Client.HeaderByNumber(ctx, nil)
-	require.NoError(t, err)
-
-	genesisBlockTime := time.UnixMilli(int64(header.Time))
-
-	// Emit some logs in blocks
-	for i := 0; i < emittedLogs; i++ {
-		_, err = th.Emitter1.EmitLog1(th.Owner, []*big.Int{big.NewInt(int64(i))})
-		require.NoError(t, err)
-		th.Client.Commit()
-	}
-
-	// First PollAndSave, no filters are registered
-	currentBlock := th.PollAndSaveLogs(ctx, 1)
-
-	err = th.LogPoller.RegisterFilter(logpoller.Filter{
-		Name:      "Test Emitter",
-		EventSigs: []common.Hash{EmitterABI.Events["Log1"].ID},
-		Addresses: []common.Address{th.EmitterAddress1},
-	})
-	require.NoError(t, err)
-
-	// Emit blocks to cover finality depth, because backup always backfill up to the one block before last finalized
-	for i := 0; i < finalityDepth+1; i++ {
-		th.Client.Commit()
-	}
-
-	// LogPoller should backfill entire history
-	th.LogPoller.BackupPollAndSaveLogs(ctx, 100)
-	require.NoError(t, err)
-
-	// Make sure that all logs are backfilled
-	logs, err := th.LogPoller.Logs(
-		0,
-		currentBlock,
-		EmitterABI.Events["Log1"].ID,
-		th.EmitterAddress1,
-		pg.WithParentCtx(testutils.Context(t)),
-	)
-	require.NoError(t, err)
-	require.Len(t, logs, emittedLogs)
-
-	// We should get all the logs by the block_timestamp
-	logs, err = th.LogPoller.LogsCreatedAfter(
-		EmitterABI.Events["Log1"].ID,
-		th.EmitterAddress1,
-		genesisBlockTime,
-		0,
-		pg.WithParentCtx(testutils.Context(t)),
-	)
-	require.NoError(t, err)
-	require.Len(t, logs, emittedLogs)
 }

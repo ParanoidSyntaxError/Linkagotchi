@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.0;
 
-import {ITypeAndVersion} from "../../shared/interfaces/ITypeAndVersion.sol";
+import {TypeAndVersionInterface} from "../../interfaces/TypeAndVersionInterface.sol";
 
-abstract contract OCR2Abstract is ITypeAndVersion {
+abstract contract OCR2Abstract is TypeAndVersionInterface {
   // Maximum number of oracles the offchain reporting protocol is designed for
   uint256 internal constant MAX_NUM_ORACLES = 31;
 

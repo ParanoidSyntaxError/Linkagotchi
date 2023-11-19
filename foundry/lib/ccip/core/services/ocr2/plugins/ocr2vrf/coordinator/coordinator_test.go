@@ -25,7 +25,6 @@ import (
 	"github.com/smartcontractkit/ocr2vrf/ocr2vrf"
 	ocr2vrftypes "github.com/smartcontractkit/ocr2vrf/types"
 
-	relaytypes "github.com/smartcontractkit/chainlink-relay/pkg/types"
 	evmclimocks "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client/mocks"
 	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/logpoller"
 	lp_mocks "github.com/smartcontractkit/chainlink/v2/core/chains/evm/logpoller/mocks"
@@ -1762,7 +1761,7 @@ func TestFilterNamesFromSpec(t *testing.T) {
 
 	spec := &job.OCR2OracleSpec{
 		ContractID: beaconAddress.String(),
-		PluginType: relaytypes.OCR2VRF,
+		PluginType: job.OCR2VRF,
 		PluginConfig: job.JSONConfig{
 			"VRFCoordinatorAddress": coordinatorAddress.String(),
 			"DKGContractAddress":    dkgAddress.String(),
@@ -1776,7 +1775,7 @@ func TestFilterNamesFromSpec(t *testing.T) {
 	assert.Equal(t, logpoller.FilterName("VRF Coordinator", beaconAddress, coordinatorAddress, dkgAddress), names[0])
 
 	spec = &job.OCR2OracleSpec{
-		PluginType:   relaytypes.OCR2VRF,
+		PluginType:   job.OCR2VRF,
 		ContractID:   beaconAddress.String(),
 		PluginConfig: nil, // missing coordinator & dkg addresses
 	}

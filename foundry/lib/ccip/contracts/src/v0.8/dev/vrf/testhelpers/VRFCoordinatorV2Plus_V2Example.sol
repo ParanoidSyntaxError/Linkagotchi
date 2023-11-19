@@ -1,22 +1,19 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.4;
 
-import "../../../shared/interfaces/LinkTokenInterface.sol";
+import "../../../interfaces/LinkTokenInterface.sol";
 import "../../interfaces/IVRFCoordinatorV2PlusMigration.sol";
-import "../../interfaces/IVRFCoordinatorV2Plus.sol";
+import "../../interfaces/IVRFMigratableCoordinatorV2Plus.sol";
 import "../VRFConsumerBaseV2Plus.sol";
 
 /// @dev this contract is only meant for testing migration
 /// @dev it is a simplified example of future version (V2) of VRFCoordinatorV2Plus
-contract VRFCoordinatorV2Plus_V2Example is IVRFCoordinatorV2PlusMigration {
-  error SubscriptionIDCollisionFound();
-
+contract VRFCoordinatorV2Plus_V2Example is IVRFCoordinatorV2PlusMigration, IVRFMigratableCoordinatorV2Plus {
   struct Subscription {
-    uint96 linkBalance;
-    uint96 nativeBalance;
-    uint64 reqCount;
     address owner;
     address[] consumers;
+    uint96 linkBalance;
+    uint96 nativeBalance;
   }
 
   mapping(uint256 => Subscription) public s_subscriptions; /* subId */ /* subscription */
@@ -45,20 +42,15 @@ contract VRFCoordinatorV2Plus_V2Example is IVRFCoordinatorV2PlusMigration {
 
   function getSubscription(
     uint256 subId
-  )
-    public
-    view
-    returns (uint96 linkBalance, uint96 nativeBalance, uint64 reqCount, address owner, address[] memory consumers)
-  {
+  ) public view returns (address owner, address[] memory consumers, uint96 linkBalance, uint96 nativeBalance) {
     if (s_subscriptions[subId].owner == address(0)) {
       revert InvalidSubscription();
     }
     return (
-      s_subscriptions[subId].linkBalance,
-      s_subscriptions[subId].nativeBalance,
-      s_subscriptions[subId].reqCount,
       s_subscriptions[subId].owner,
-      s_subscriptions[subId].consumers
+      s_subscriptions[subId].consumers,
+      s_subscriptions[subId].linkBalance,
+      s_subscriptions[subId].nativeBalance
     );
   }
 
@@ -84,7 +76,7 @@ contract VRFCoordinatorV2Plus_V2Example is IVRFCoordinatorV2PlusMigration {
     address subOwner;
     address[] consumers;
     uint96 linkBalance;
-    uint96 nativeBalance;
+    uint96 ethBalance;
   }
 
   /**
@@ -101,30 +93,17 @@ contract VRFCoordinatorV2Plus_V2Example is IVRFCoordinatorV2PlusMigration {
       revert InvalidVersion(migrationData.fromVersion, 1);
     }
 
-    if (msg.value != uint256(migrationData.nativeBalance)) {
-      revert InvalidNativeBalance(msg.value, migrationData.nativeBalance);
-    }
-
-    // it should be impossible to have a subscription id collision, for two reasons:
-    // 1. the subscription ID is calculated using inputs that cannot be replicated under different
-    // conditions.
-    // 2. once a subscription is migrated it is deleted from the previous coordinator, so it cannot
-    // be migrated again.
-    // however, we should have this check here in case the `migrate` function on
-    // future coordinators "forgets" to delete subscription data allowing re-migration of the same
-    // subscription.
-    if (s_subscriptions[migrationData.subId].owner != address(0)) {
-      revert SubscriptionIDCollisionFound();
+    if (msg.value != uint256(migrationData.ethBalance)) {
+      revert InvalidNativeBalance(msg.value, migrationData.ethBalance);
     }
 
     s_subscriptions[migrationData.subId] = Subscription({
-      nativeBalance: migrationData.nativeBalance,
-      linkBalance: migrationData.linkBalance,
-      reqCount: 0,
       owner: migrationData.subOwner,
-      consumers: migrationData.consumers
+      consumers: migrationData.consumers,
+      nativeBalance: migrationData.ethBalance,
+      linkBalance: migrationData.linkBalance
     });
-    s_totalNativeBalance += migrationData.nativeBalance;
+    s_totalNativeBalance += migrationData.ethBalance;
     s_totalLinkBalance += migrationData.linkBalance;
   }
 
@@ -132,9 +111,12 @@ contract VRFCoordinatorV2Plus_V2Example is IVRFCoordinatorV2PlusMigration {
    * Section: Request/Response
    **************************************************************************/
 
-  function requestRandomWords(VRFV2PlusClient.RandomWordsRequest calldata req) external returns (uint256 requestId) {
-    Subscription memory sub = s_subscriptions[req.subId];
-    sub.reqCount = sub.reqCount + 1;
+  /**
+   * @inheritdoc IVRFMigratableCoordinatorV2Plus
+   */
+  function requestRandomWords(
+    VRFV2PlusClient.RandomWordsRequest calldata /* req */
+  ) external override returns (uint256 requestId) {
     return handleRequest(msg.sender);
   }
 

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -69,7 +68,7 @@ func TestPipelineRunsController_CreateWithBody_HappyPath(t *testing.T) {
 
 	// Make the request
 	{
-		client := app.NewHTTPClient(&cltest.User{})
+		client := app.NewHTTPClient(cltest.APIEmailAdmin)
 		body := strings.NewReader(`{"data":{"result":"123.45"}}`)
 		response, cleanup := client.Post("/v2/jobs/"+uuid.String()+"/runs", body)
 		defer cleanup()
@@ -130,7 +129,7 @@ func TestPipelineRunsController_CreateNoBody_HappyPath(t *testing.T) {
 
 	// Make the request (authorized as user)
 	{
-		client := app.NewHTTPClient(&cltest.User{})
+		client := app.NewHTTPClient(cltest.APIEmailAdmin)
 		response, cleanup := client.Post("/v2/jobs/"+uuid.String()+"/runs", nil)
 		defer cleanup()
 		cltest.AssertServerResponse(t, response, http.StatusOK)
@@ -150,12 +149,7 @@ func TestPipelineRunsController_CreateNoBody_HappyPath(t *testing.T) {
 func TestPipelineRunsController_Index_GlobalHappyPath(t *testing.T) {
 	client, jobID, runIDs := setupPipelineRunsControllerTests(t)
 
-	url := url.URL{Path: "/v2/pipeline/runs"}
-	query := url.Query()
-	query.Set("evmChainID", cltest.FixtureChainID.String())
-	url.RawQuery = query.Encode()
-
-	response, cleanup := client.Get(url.String())
+	response, cleanup := client.Get("/v2/pipeline/runs")
 	defer cleanup()
 	cltest.AssertServerResponse(t, response, http.StatusOK)
 
@@ -243,7 +237,7 @@ func TestPipelineRunsController_ShowRun_InvalidID(t *testing.T) {
 	t.Parallel()
 	app := cltest.NewApplicationEVMDisabled(t)
 	require.NoError(t, app.Start(testutils.Context(t)))
-	client := app.NewHTTPClient(&cltest.User{})
+	client := app.NewHTTPClient(cltest.APIEmailAdmin)
 
 	response, cleanup := client.Get("/v2/jobs/1/runs/invalid-run-ID")
 	defer cleanup()
@@ -263,7 +257,7 @@ func setupPipelineRunsControllerTests(t *testing.T) (cltest.HTTPClientCleaner, i
 	app := cltest.NewApplicationWithConfigAndKey(t, cfg, ethClient, cltest.DefaultP2PKey)
 	require.NoError(t, app.Start(testutils.Context(t)))
 	require.NoError(t, app.KeyStore.OCR().Add(cltest.DefaultOCRKey))
-	client := app.NewHTTPClient(&cltest.User{})
+	client := app.NewHTTPClient(cltest.APIEmailAdmin)
 
 	key, _ := cltest.MustInsertRandomKey(t, app.KeyStore.Eth())
 
@@ -272,7 +266,6 @@ func setupPipelineRunsControllerTests(t *testing.T) (cltest.HTTPClientCleaner, i
 	schemaVersion      = 1
 	externalJobID       = "0EEC7E1D-D0D2-476C-A1A8-72DFB6633F46"
 	contractAddress    = "%s"
-	evmChainID		   = "0"
 	p2pBootstrapPeers  = [
 		"/dns4/chain.link/tcp/1234/p2p/16Uiu2HAm58SP7UL8zsnpeuwHfytLocaqgnyaYKP8wu7qRdrixLju",
 	]

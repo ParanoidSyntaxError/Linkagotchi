@@ -26,16 +26,10 @@ var RevertReasonCmd = &cobra.Command{
 		}
 
 		if decodeFromError {
-			result, err := baseHandler.RevertReasonFromErrorCodeString(args[0])
-			if err != nil {
-				log.Fatal("failed to decode error code string: ", err)
-			}
+			result := baseHandler.RevertReasonFromErrorCodeString(args[0])
 			fmt.Print(result)
 		} else {
-			result, err := baseHandler.RevertReasonFromTx(args[0])
-			if err != nil {
-				log.Fatal("failed to decode error code string: ", err)
-			}
+			result := baseHandler.RevertReasonFromTx(args[0])
 			fmt.Print(result)
 		}
 	},

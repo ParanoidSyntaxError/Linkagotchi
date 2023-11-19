@@ -19,30 +19,27 @@ const (
 		2_100 // COLD_SLOAD_COST for obtanining price of token to use for aggregate token bucket
 	RATE_LIMITER_OVERHEAD_GAS = 2_100 + // COLD_SLOAD_COST for accessing token bucket
 		5_000 // SSTORE_RESET_GAS for updating & decreasing token bucket
-	EXTERNAL_CALL_OVERHEAD_GAS = 2600 + // because the receiver will be untouched initially
-		30_000*3 // supportsInterface of ERC165Checker library performs 3 static-calls of 30k gas each
-	FEE_BOOSTING_OVERHEAD_GAS               = 200_000
-	CONSTANT_MESSAGE_PART_BYTES             = 10 * 32 // A message consists of 10 abi encoded fields 32B each (after encoding)
+	EXTERNAL_CALL_OVERHEAD_GAS  = 2600 // because the receiver will be untouched initially
+	FEE_BOOSTING_OVERHEAD_GAS   = 200_000
+	CONSTANT_MESSAGE_PART_BYTES = 32 + // sourceChainId
+		32 + // feeTokenAmount
+		8 + // sequenceNumber
+		20 + // sender
+		32 + // gas limit
+		8 + // nonce
+		1 + // strict
+		20 + // receiver
+		32 // fee token
 	EXECUTION_STATE_PROCESSING_OVERHEAD_GAS = 2_100 + // COLD_SLOAD_COST for first reading the state
 		20_000 + // SSTORE_SET_GAS for writing from 0 (untouched) to non-zero (in-progress)
 		100 //# SLOAD_GAS = WARM_STORAGE_READ_COST for rewriting from non-zero (in-progress) to non-zero (success/failure)
-	EVM_MESSAGE_FIXED_BYTES     = 448 // Byte size of fixed-size fields in EVM2EVMMessage
-	EVM_MESSAGE_BYTES_PER_TOKEN = 128 // Byte size of each token transfer, consisting of 1 EVMTokenAmount and 1 bytes, excl length of bytes
-	DA_MULTIPLIER_BASE          = int64(10000)
 )
-
-// return the size of bytes for msg tokens
-func bytesForMsgTokens(numTokens int) int {
-	// token address (address) + token amount (uint256)
-	return (EVM_ADDRESS_LENGTH_BYTES + EVM_WORD_BYTES) * numTokens
-}
 
 // Offchain: we compute the max overhead gas to determine msg executability.
 func overheadGas(dataLength, numTokens int) uint64 {
 	messageBytes := CONSTANT_MESSAGE_PART_BYTES +
-		bytesForMsgTokens(numTokens) +
+		(EVM_ADDRESS_LENGTH_BYTES+EVM_WORD_BYTES)*numTokens + // token address (address) + token amount (uint256)
 		dataLength
-
 	messageCallDataGas := uint64(messageBytes * CALLDATA_GAS_PER_BYTE)
 
 	// Rate limiter only limits value in tokens. It's not called if there are no
@@ -60,10 +57,18 @@ func overheadGas(dataLength, numTokens int) uint64 {
 }
 
 func maxGasOverHeadGas(numMsgs, dataLength, numTokens int) uint64 {
-	merkleProofBytes := (math.Ceil(math.Log2(float64(numMsgs))))*32 + (1+2)*32 // only ever one outer root hash
+	merkleProofBytes := (math.Ceil(math.Log2(float64(numMsgs)))+2)*32 + (1+2)*32 // only ever one outer root hash
 	merkleGasShare := uint64(merkleProofBytes * CALLDATA_GAS_PER_BYTE)
 
 	return overheadGas(dataLength, numTokens) + merkleGasShare
+}
+
+// computeExecCost calculates the costs for next execution, and converts to USD value scaled by 1e18 (e.g. 5$ = 5e18).
+func computeExecCost(gasLimit *big.Int, execGasPriceEstimate, tokenPriceUSD *big.Int) *big.Int {
+	execGasEstimate := new(big.Int).Add(big.NewInt(FEE_BOOSTING_OVERHEAD_GAS), gasLimit)
+	execGasEstimate = new(big.Int).Mul(execGasEstimate, execGasPriceEstimate)
+
+	return calculateUsdPerUnitGas(execGasEstimate, tokenPriceUSD)
 }
 
 // waitBoostedFee boosts the given fee according to the time passed since the msg was sent.

@@ -3,1567 +3,115 @@ package ccip
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"math/big"
 	"math/rand"
-	"reflect"
-	"sort"
 	"testing"
 	"time"
 
-	"github.com/Masterminds/semver/v3"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/leanovate/gopter"
 	"github.com/leanovate/gopter/gen"
 	"github.com/leanovate/gopter/prop"
-	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/smartcontractkit/libocr/offchainreporting2plus/types"
 
+	"github.com/smartcontractkit/chainlink/v2/core/assets"
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/client"
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/gas"
 	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/gas/mocks"
-	mocks2 "github.com/smartcontractkit/chainlink/v2/core/chains/evm/logpoller/mocks"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/commit_store"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/link_token_interface"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/price_registry"
+	mock_contracts "github.com/smartcontractkit/chainlink/v2/core/gethwrappers/mocks"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
+	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/abihelpers"
+	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/cache"
 	ccipconfig "github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/config"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/internal"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/internal/cache"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/internal/ccipcalc"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/internal/ccipdata"
-	ccipdatamocks "github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/internal/ccipdata/mocks"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/internal/hashlib"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/internal/merklemulti"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/internal/pricegetter"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/prices"
+	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/hasher"
+	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/merklemulti"
+
+	plugintesthelpers "github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/testhelpers/plugins"
 	"github.com/smartcontractkit/chainlink/v2/core/store/models"
 	"github.com/smartcontractkit/chainlink/v2/core/utils"
 )
 
-func TestCommitReportingPlugin_Observation(t *testing.T) {
-	sourceNativeTokenAddr := common.HexToAddress("1000")
-	someTokenAddr := common.HexToAddress("2000")
+var defaultGasPrice = big.NewInt(3e9)
 
-	testCases := []struct {
-		name                string
-		epochAndRound       types.ReportTimestamp
-		commitStoreIsPaused bool
-		commitStoreSeqNum   uint64
-		tokenPrices         map[common.Address]*big.Int
-		sendReqs            []ccipdata.Event[internal.EVM2EVMMessage]
-		tokenDecimals       map[common.Address]uint8
-		fee                 *big.Int
+type commitTestHarness = struct {
+	plugintesthelpers.CCIPPluginTestHarness
+	plugin       *CommitReportingPlugin
+	mockedGetFee *mock.Call
+}
 
-		expErr bool
-		expObs CommitObservation
-	}{
-		{
-			name:              "base report",
-			commitStoreSeqNum: 54,
-			tokenPrices: map[common.Address]*big.Int{
-				someTokenAddr:         big.NewInt(2),
-				sourceNativeTokenAddr: big.NewInt(2),
-			},
-			sendReqs: []ccipdata.Event[internal.EVM2EVMMessage]{
-				{Data: internal.EVM2EVMMessage{SequenceNumber: 54}},
-				{Data: internal.EVM2EVMMessage{SequenceNumber: 55}},
-			},
-			fee: big.NewInt(100),
-			tokenDecimals: map[common.Address]uint8{
-				someTokenAddr: 8,
-			},
-			expObs: CommitObservation{
-				TokenPricesUSD: map[common.Address]*big.Int{
-					someTokenAddr: big.NewInt(20000000000),
-				},
-				SourceGasPriceUSD: big.NewInt(0),
-				Interval: ccipdata.CommitStoreInterval{
-					Min: 54,
-					Max: 55,
-				},
-			},
+func setupCommitTestHarness(t *testing.T) commitTestHarness {
+	th := plugintesthelpers.SetupCCIPTestHarness(t)
+
+	sourceFeeEstimator := mocks.NewEvmFeeEstimator(t)
+
+	mockedGetFee := sourceFeeEstimator.On(
+		"GetFee",
+		mock.Anything,
+		mock.Anything,
+		mock.Anything,
+		mock.Anything,
+	).Maybe().Return(gas.EvmFee{Legacy: assets.NewWei(defaultGasPrice)}, uint32(200e3), nil)
+
+	backendClient := client.NewSimulatedBackendClient(t, th.Dest.Chain, new(big.Int).SetUint64(th.Dest.ChainID))
+	plugin := CommitReportingPlugin{
+		config: CommitPluginConfig{
+			lggr:                th.Lggr,
+			sourceLP:            th.SourceLP,
+			destLP:              th.DestLP,
+			offRamp:             th.Dest.OffRamp,
+			onRampAddress:       th.Source.OnRamp.Address(),
+			commitStore:         th.Dest.CommitStore,
+			priceGetter:         fakePriceGetter{},
+			sourceNative:        utils.RandomAddress(),
+			sourceFeeEstimator:  sourceFeeEstimator,
+			sourceChainSelector: th.Source.ChainID,
+			destClient:          backendClient,
+			leafHasher:          hasher.NewLeafHasher(th.Source.ChainID, th.Dest.ChainID, th.Source.OnRamp.Address(), hasher.NewKeccakCtx()),
+			getSeqNumFromLog:    getSeqNumFromLog(th.Source.OnRamp),
 		},
-		{
-			name:                "commit store is down",
-			commitStoreIsPaused: true,
-			expErr:              true,
+		inflightReports: newInflightCommitReportsContainer(time.Hour),
+		onchainConfig:   th.CommitOnchainConfig,
+		offchainConfig: ccipconfig.CommitOffchainConfig{
+			SourceFinalityDepth:   0,
+			DestFinalityDepth:     0,
+			FeeUpdateDeviationPPB: 5e7,
+			FeeUpdateHeartBeat:    models.MustMakeDuration(12 * time.Hour),
+			MaxGasPrice:           200e9,
 		},
+		lggr:                  th.Lggr,
+		destPriceRegistry:     th.Dest.PriceRegistry,
+		tokenToDecimalMapping: cache.NewTokenToDecimals(th.Lggr, th.DestLP, th.Dest.OffRamp, th.Dest.PriceRegistry, backendClient, 0),
 	}
-
-	ctx := testutils.Context(t)
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			sourceFinalityDepth := 10
-
-			commitStoreReader := ccipdatamocks.NewCommitStoreReader(t)
-			commitStoreReader.On("IsDown", ctx).Return(tc.commitStoreIsPaused, nil)
-			if !tc.commitStoreIsPaused {
-				commitStoreReader.On("GetExpectedNextSequenceNumber", ctx).Return(tc.commitStoreSeqNum, nil)
-			}
-
-			onRampReader := ccipdatamocks.NewOnRampReader(t)
-			if len(tc.sendReqs) > 0 {
-				onRampReader.On("GetSendRequestsGteSeqNum", ctx, tc.commitStoreSeqNum, sourceFinalityDepth).
-					Return(tc.sendReqs, nil)
-			}
-
-			tokenDecimalsCache := cache.NewMockAutoSync[map[common.Address]uint8](t)
-			if len(tc.tokenDecimals) > 0 {
-				tokenDecimalsCache.On("Get", ctx).Return(tc.tokenDecimals, nil)
-			}
-
-			priceGet := pricegetter.NewMockPriceGetter(t)
-			if len(tc.tokenPrices) > 0 {
-				addrs := []common.Address{sourceNativeTokenAddr}
-				for addr := range tc.tokenDecimals {
-					addrs = append(addrs, addr)
-				}
-				priceGet.On("TokenPricesUSD", mock.Anything, addrs).Return(tc.tokenPrices, nil)
-			}
-
-			gasPriceEstimator := prices.NewMockGasPriceEstimatorCommit(t)
-			if tc.fee != nil {
-				var p prices.GasPrice = tc.fee
-				var pUSD prices.GasPrice = ccipcalc.CalculateUsdPerUnitGas(p, tc.tokenPrices[sourceNativeTokenAddr])
-				gasPriceEstimator.On("GetGasPrice", ctx).Return(p, nil)
-				gasPriceEstimator.On("DenoteInUSD", p, tc.tokenPrices[sourceNativeTokenAddr]).Return(pUSD, nil)
-			}
-
-			p := &CommitReportingPlugin{}
-			p.lggr = logger.TestLogger(t)
-			p.inflightReports = newInflightCommitReportsContainer(time.Hour)
-			p.commitStoreReader = commitStoreReader
-			p.offchainConfig.SourceFinalityDepth = uint32(sourceFinalityDepth)
-			p.onRampReader = onRampReader
-			p.tokenDecimalsCache = tokenDecimalsCache
-			p.priceGetter = priceGet
-			p.sourceNative = sourceNativeTokenAddr
-			p.gasPriceEstimator = gasPriceEstimator
-
-			obs, err := p.Observation(ctx, tc.epochAndRound, types.Query{})
-
-			if tc.expErr {
-				assert.Error(t, err)
-				return
-			}
-			assert.NoError(t, err)
-
-			expObsBytes, err := tc.expObs.Marshal()
-			assert.NoError(t, err)
-			assert.Equal(t, expObsBytes, []byte(obs))
-		})
+	return commitTestHarness{
+		CCIPPluginTestHarness: th,
+		plugin:                &plugin,
+		mockedGetFee:          mockedGetFee,
 	}
 }
 
-func TestCommitReportingPlugin_Report(t *testing.T) {
-	ctx := testutils.Context(t)
-	sourceChainSelector := uint64(rand.Int())
-	var gasPrice prices.GasPrice = big.NewInt(1)
-	gasPriceHeartBeat := models.MustMakeDuration(time.Hour)
-
-	t.Run("not enough observations", func(t *testing.T) {
-		tokenDecimalsCache := cache.NewMockAutoSync[map[common.Address]uint8](t)
-		tokenDecimalsCache.On("Get", ctx).Return(make(map[common.Address]uint8), nil)
-
-		p := &CommitReportingPlugin{}
-		p.lggr = logger.TestLogger(t)
-		p.tokenDecimalsCache = tokenDecimalsCache
-		p.F = 1
-
-		o := CommitObservation{Interval: ccipdata.CommitStoreInterval{Min: 1, Max: 1}, SourceGasPriceUSD: big.NewInt(0)}
-		obs, err := o.Marshal()
-		assert.NoError(t, err)
-
-		aos := []types.AttributedObservation{{Observation: obs}}
-
-		gotSomeReport, gotReport, err := p.Report(ctx, types.ReportTimestamp{}, types.Query{}, aos)
-		assert.False(t, gotSomeReport)
-		assert.Nil(t, gotReport)
-		assert.Error(t, err)
-	})
-
-	testCases := []struct {
-		name              string
-		observations      []CommitObservation
-		f                 int
-		gasPriceUpdates   []ccipdata.Event[ccipdata.GasPriceUpdate]
-		tokenDecimals     map[common.Address]uint8
-		tokenPriceUpdates []ccipdata.Event[ccipdata.TokenPriceUpdate]
-		sendRequests      []ccipdata.Event[internal.EVM2EVMMessage]
-
-		expCommitReport *ccipdata.CommitStoreReport
-		expSeqNumRange  ccipdata.CommitStoreInterval
-		expErr          bool
-	}{
-		{
-			name: "base",
-			observations: []CommitObservation{
-				{Interval: ccipdata.CommitStoreInterval{Min: 1, Max: 1}, SourceGasPriceUSD: gasPrice},
-				{Interval: ccipdata.CommitStoreInterval{Min: 1, Max: 1}, SourceGasPriceUSD: gasPrice},
-			},
-			f: 1,
-			sendRequests: []ccipdata.Event[internal.EVM2EVMMessage]{
-				{
-					Data: internal.EVM2EVMMessage{
-						SequenceNumber: 1,
-					},
-				},
-			},
-			gasPriceUpdates: []ccipdata.Event[ccipdata.GasPriceUpdate]{
-				{
-					Data: ccipdata.GasPriceUpdate{
-						GasPrice: ccipdata.GasPrice{
-							DestChainSelector: sourceChainSelector,
-							Value:             big.NewInt(1),
-						},
-						TimestampUnixSec: big.NewInt(time.Now().Add(-2 * gasPriceHeartBeat.Duration()).Unix()),
-					},
-				},
-			},
-			expSeqNumRange: ccipdata.CommitStoreInterval{Min: 1, Max: 1},
-			expCommitReport: &ccipdata.CommitStoreReport{
-				MerkleRoot:  [32]byte{},
-				Interval:    ccipdata.CommitStoreInterval{Min: 1, Max: 1},
-				TokenPrices: nil,
-				GasPrices:   []ccipdata.GasPrice{{DestChainSelector: uint64(sourceChainSelector), Value: gasPrice}},
-			},
-			expErr: false,
-		},
-		{
-			name: "empty",
-			observations: []CommitObservation{
-				{Interval: ccipdata.CommitStoreInterval{Min: 0, Max: 0}, SourceGasPriceUSD: big.NewInt(0)},
-				{Interval: ccipdata.CommitStoreInterval{Min: 0, Max: 0}, SourceGasPriceUSD: big.NewInt(0)},
-			},
-			gasPriceUpdates: []ccipdata.Event[ccipdata.GasPriceUpdate]{
-				{
-					Data: ccipdata.GasPriceUpdate{
-						GasPrice: ccipdata.GasPrice{
-							DestChainSelector: sourceChainSelector,
-							Value:             big.NewInt(1),
-						},
-						TimestampUnixSec: big.NewInt(time.Now().Add(-gasPriceHeartBeat.Duration() / 2).Unix()),
-					},
-				},
-			},
-			f:      1,
-			expErr: false,
-		},
-		{
-			name: "no leaves",
-			observations: []CommitObservation{
-				{Interval: ccipdata.CommitStoreInterval{Min: 2, Max: 2}, SourceGasPriceUSD: big.NewInt(0)},
-				{Interval: ccipdata.CommitStoreInterval{Min: 2, Max: 2}, SourceGasPriceUSD: big.NewInt(0)},
-			},
-			f:              1,
-			sendRequests:   []ccipdata.Event[internal.EVM2EVMMessage]{{}},
-			expSeqNumRange: ccipdata.CommitStoreInterval{Min: 2, Max: 2},
-			expErr:         true,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			destPriceRegistryReader := ccipdatamocks.NewPriceRegistryReader(t)
-			destPriceRegistryReader.On("GetGasPriceUpdatesCreatedAfter", ctx, sourceChainSelector, mock.Anything, 0).Return(tc.gasPriceUpdates, nil)
-			destPriceRegistryReader.On("GetTokenPriceUpdatesCreatedAfter", ctx, mock.Anything, 0).Return(tc.tokenPriceUpdates, nil)
-
-			onRampReader := ccipdatamocks.NewOnRampReader(t)
-			if len(tc.sendRequests) > 0 {
-				onRampReader.On("GetSendRequestsBetweenSeqNums", ctx, tc.expSeqNumRange.Min, tc.expSeqNumRange.Max, 0).Return(tc.sendRequests, nil)
-			}
-
-			gasPriceEstimator := prices.NewMockGasPriceEstimatorCommit(t)
-			gasPriceEstimator.On("Median", mock.Anything).Return(gasPrice, nil)
-			if tc.gasPriceUpdates != nil {
-				gasPriceEstimator.On("Deviates", mock.Anything, mock.Anything, mock.Anything).Return(false, nil)
-			}
-
-			tokenDecimalsCache := cache.NewMockAutoSync[map[common.Address]uint8](t)
-			tokenDecimalsCache.On("Get", ctx).Return(tc.tokenDecimals, nil)
-
-			lp := mocks2.NewLogPoller(t)
-			lp.On("RegisterFilter", mock.Anything).Return(nil)
-			commitStoreReader, err := ccipdata.NewCommitStoreV1_2_0(logger.TestLogger(t), utils.RandomAddress(), nil, lp, nil)
-			assert.NoError(t, err)
-
-			p := &CommitReportingPlugin{}
-			p.lggr = logger.TestLogger(t)
-			p.inflightReports = newInflightCommitReportsContainer(time.Minute)
-			p.destPriceRegistryReader = destPriceRegistryReader
-			p.onRampReader = onRampReader
-			p.sourceChainSelector = sourceChainSelector
-			p.tokenDecimalsCache = tokenDecimalsCache
-			p.gasPriceEstimator = gasPriceEstimator
-			p.offchainConfig.GasPriceHeartBeat = gasPriceHeartBeat.Duration()
-			p.commitStoreReader = commitStoreReader
-			p.F = tc.f
-
-			aos := make([]types.AttributedObservation, 0, len(tc.observations))
-			for _, o := range tc.observations {
-				obs, err2 := o.Marshal()
-				assert.NoError(t, err2)
-				aos = append(aos, types.AttributedObservation{Observation: obs})
-			}
-
-			gotSomeReport, gotReport, err := p.Report(ctx, types.ReportTimestamp{}, types.Query{}, aos)
-			if tc.expErr {
-				assert.Error(t, err)
-				return
-			}
-
-			assert.NoError(t, err)
-
-			if tc.expCommitReport != nil {
-				assert.True(t, gotSomeReport)
-				encodedExpectedReport, err := ccipdata.EncodeCommitReport(*tc.expCommitReport)
-				assert.NoError(t, err)
-				assert.Equal(t, types.Report(encodedExpectedReport), gotReport)
-			}
-		})
-	}
-}
-
-func TestCommitReportingPlugin_ShouldAcceptFinalizedReport(t *testing.T) {
-	ctx := testutils.Context(t)
-
-	newPlugin := func() *CommitReportingPlugin {
-		p := &CommitReportingPlugin{}
-		p.lggr = logger.TestLogger(t)
-		p.inflightReports = newInflightCommitReportsContainer(time.Minute)
-		return p
-	}
-
-	t.Run("report cannot be decoded leads to error", func(t *testing.T) {
-		p := newPlugin()
-
-		encodedReport := []byte("whatever")
-
-		commitStoreReader := ccipdatamocks.NewCommitStoreReader(t)
-		p.commitStoreReader = commitStoreReader
-		commitStoreReader.On("DecodeCommitReport", encodedReport).
-			Return(ccipdata.CommitStoreReport{}, errors.New("unable to decode report"))
-
-		_, err := p.ShouldAcceptFinalizedReport(ctx, types.ReportTimestamp{}, encodedReport)
-		assert.Error(t, err)
-	})
-
-	t.Run("empty report should not be accepted", func(t *testing.T) {
-		p := newPlugin()
-
-		report := ccipdata.CommitStoreReport{}
-
-		commitStoreReader := ccipdatamocks.NewCommitStoreReader(t)
-		p.commitStoreReader = commitStoreReader
-		commitStoreReader.On("DecodeCommitReport", mock.Anything).Return(report, nil)
-
-		encodedReport, err := ccipdata.EncodeCommitReport(report)
-		assert.NoError(t, err)
-		shouldAccept, err := p.ShouldAcceptFinalizedReport(ctx, types.ReportTimestamp{}, encodedReport)
-		assert.NoError(t, err)
-		assert.False(t, shouldAccept)
-	})
-
-	t.Run("stale report should not be accepted", func(t *testing.T) {
-		onChainSeqNum := uint64(100)
-
-		//_, _ := testhelpers.NewFakeCommitStore(t, onChainSeqNum)
-
-		commitStoreReader := ccipdatamocks.NewCommitStoreReader(t)
-		p := newPlugin()
-
-		p.commitStoreReader = commitStoreReader
-
-		report := ccipdata.CommitStoreReport{
-			GasPrices:  []ccipdata.GasPrice{{Value: big.NewInt(int64(rand.Int()))}},
-			MerkleRoot: [32]byte{123}, // this report is considered non-empty since it has a merkle root
-		}
-
-		commitStoreReader.On("DecodeCommitReport", mock.Anything).Return(report, nil)
-		commitStoreReader.On("GetExpectedNextSequenceNumber", mock.Anything).Return(onChainSeqNum, nil)
-
-		// stale since report interval is behind on chain seq num
-		report.Interval = ccipdata.CommitStoreInterval{Min: onChainSeqNum - 2, Max: onChainSeqNum + 10}
-		encodedReport, err := ccipdata.EncodeCommitReport(report)
-		assert.NoError(t, err)
-
-		shouldAccept, err := p.ShouldAcceptFinalizedReport(ctx, types.ReportTimestamp{}, encodedReport)
-		assert.NoError(t, err)
-		assert.False(t, shouldAccept)
-	})
-
-	t.Run("non-stale report should be accepted and added inflight", func(t *testing.T) {
-		onChainSeqNum := uint64(100)
-
-		p := newPlugin()
-
-		priceRegistryReader := ccipdatamocks.NewPriceRegistryReader(t)
-		p.destPriceRegistryReader = priceRegistryReader
-
-		p.lggr = logger.TestLogger(t)
-		commitStoreReader := ccipdatamocks.NewCommitStoreReader(t)
-		p.commitStoreReader = commitStoreReader
-
-		report := ccipdata.CommitStoreReport{
-			Interval: ccipdata.CommitStoreInterval{
-				Min: onChainSeqNum,
-				Max: onChainSeqNum + 10,
-			},
-			TokenPrices: []ccipdata.TokenPrice{
-				{
-					Token: utils.RandomAddress(),
-					Value: big.NewInt(int64(rand.Int())),
-				},
-			},
-			GasPrices: []ccipdata.GasPrice{
-				{
-					DestChainSelector: rand.Uint64(),
-					Value:             big.NewInt(int64(rand.Int())),
-				},
-			},
-			MerkleRoot: [32]byte{123},
-		}
-		commitStoreReader.On("DecodeCommitReport", mock.Anything).Return(report, nil)
-		commitStoreReader.On("GetExpectedNextSequenceNumber", mock.Anything).Return(onChainSeqNum, nil)
-
-		// non-stale since report interval is not behind on-chain seq num
-		report.Interval = ccipdata.CommitStoreInterval{Min: onChainSeqNum, Max: onChainSeqNum + 10}
-		encodedReport, err := ccipdata.EncodeCommitReport(report)
-		assert.NoError(t, err)
-
-		shouldAccept, err := p.ShouldAcceptFinalizedReport(ctx, types.ReportTimestamp{}, encodedReport)
-		assert.NoError(t, err)
-		assert.True(t, shouldAccept)
-
-		// make sure that the report was added inflight
-		tokenPriceUpdates := p.inflightReports.latestInflightTokenPriceUpdates()
-		priceUpdate := tokenPriceUpdates[report.TokenPrices[0].Token]
-		assert.Equal(t, report.TokenPrices[0].Value.Uint64(), priceUpdate.value.Uint64())
-	})
-}
-
-func TestCommitReportingPlugin_ShouldTransmitAcceptedReport(t *testing.T) {
-	report := ccipdata.CommitStoreReport{
-		TokenPrices: []ccipdata.TokenPrice{
-			{Token: utils.RandomAddress(), Value: big.NewInt(9e18)},
-		},
-		GasPrices: []ccipdata.GasPrice{
-			{
-
-				DestChainSelector: rand.Uint64(),
-				Value:             big.NewInt(2000e9),
-			},
-		},
-		MerkleRoot: [32]byte{123},
-	}
-
-	ctx := testutils.Context(t)
-	p := &CommitReportingPlugin{}
-	commitStoreReader := ccipdatamocks.NewCommitStoreReader(t)
-	onChainSeqNum := uint64(100)
-	commitStoreReader.On("GetExpectedNextSequenceNumber", mock.Anything).Return(onChainSeqNum, nil)
-	p.commitStoreReader = commitStoreReader
-	p.inflightReports = newInflightCommitReportsContainer(time.Minute)
-	p.lggr = logger.TestLogger(t)
-
-	t.Run("should transmit when report is not stale", func(t *testing.T) {
-		// not-stale since report interval is not behind on chain seq num
-		report.Interval = ccipdata.CommitStoreInterval{Min: onChainSeqNum, Max: onChainSeqNum + 10}
-		encodedReport, err := ccipdata.EncodeCommitReport(report)
-		assert.NoError(t, err)
-		commitStoreReader.On("DecodeCommitReport", encodedReport).Return(report, nil).Once()
-		shouldTransmit, err := p.ShouldTransmitAcceptedReport(ctx, types.ReportTimestamp{}, encodedReport)
-		assert.NoError(t, err)
-		assert.True(t, shouldTransmit)
-	})
-
-	t.Run("should not transmit when report is stale", func(t *testing.T) {
-		// stale since report interval is behind on chain seq num
-		report.Interval = ccipdata.CommitStoreInterval{Min: onChainSeqNum - 2, Max: onChainSeqNum + 10}
-		encodedReport, err := ccipdata.EncodeCommitReport(report)
-		assert.NoError(t, err)
-		commitStoreReader.On("DecodeCommitReport", encodedReport).Return(report, nil).Once()
-		shouldTransmit, err := p.ShouldTransmitAcceptedReport(ctx, types.ReportTimestamp{}, encodedReport)
-		assert.NoError(t, err)
-		assert.False(t, shouldTransmit)
-	})
-
-	t.Run("error when report cannot be decoded", func(t *testing.T) {
-		reportBytes := []byte("whatever")
-		commitStoreReader.On("DecodeCommitReport", reportBytes).
-			Return(ccipdata.CommitStoreReport{}, errors.New("decode error")).Once()
-		_, err := p.ShouldTransmitAcceptedReport(ctx, types.ReportTimestamp{}, reportBytes)
-		assert.Error(t, err)
-	})
-}
-
-func TestCommitReportingPlugin_validateObservations(t *testing.T) {
-	ctx := context.Background()
-
-	token1 := common.HexToAddress("0xa")
-	token2 := common.HexToAddress("0xb")
-	token1Price := big.NewInt(1)
-	token2Price := big.NewInt(2)
-	unsupportedToken := common.HexToAddress("0xc")
-	gasPrice := big.NewInt(100)
-
-	tokenDecimals := make(map[common.Address]uint8)
-	tokenDecimals[token1] = 18
-	tokenDecimals[token2] = 18
-
-	ob1 := CommitObservation{
-		Interval: ccipdata.CommitStoreInterval{Min: 0, Max: 0},
-		TokenPricesUSD: map[common.Address]*big.Int{
-			token1: token1Price,
-			token2: token2Price,
-		},
-		SourceGasPriceUSD: gasPrice,
-	}
-	ob1Bytes, err := ob1.Marshal()
-	assert.NoError(t, err)
-	var ob2, ob3 CommitObservation
-	_ = json.Unmarshal(ob1Bytes, &ob2)
-	_ = json.Unmarshal(ob1Bytes, &ob3)
-
-	obWithNilGasPrice := CommitObservation{
-		Interval: ccipdata.CommitStoreInterval{Min: 0, Max: 0},
-		TokenPricesUSD: map[common.Address]*big.Int{
-			token1: token1Price,
-			token2: token2Price,
-		},
-		SourceGasPriceUSD: nil,
-	}
-	obWithNilTokenPrice := CommitObservation{
-		Interval: ccipdata.CommitStoreInterval{Min: 0, Max: 0},
-		TokenPricesUSD: map[common.Address]*big.Int{
-			token1: token1Price,
-			token2: nil,
-		},
-		SourceGasPriceUSD: gasPrice,
-	}
-	obMissingTokenPrices := CommitObservation{
-		Interval:          ccipdata.CommitStoreInterval{Min: 0, Max: 0},
-		TokenPricesUSD:    map[common.Address]*big.Int{},
-		SourceGasPriceUSD: gasPrice,
-	}
-	obWithUnsupportedToken := CommitObservation{
-		Interval: ccipdata.CommitStoreInterval{Min: 0, Max: 0},
-		TokenPricesUSD: map[common.Address]*big.Int{
-			token1:           token1Price,
-			token2:           token2Price,
-			unsupportedToken: token2Price,
-		},
-		SourceGasPriceUSD: gasPrice,
-	}
-	obEmpty := CommitObservation{
-		Interval:          ccipdata.CommitStoreInterval{Min: 0, Max: 0},
-		TokenPricesUSD:    nil,
-		SourceGasPriceUSD: nil,
-	}
-
-	testCases := []struct {
-		name               string
-		commitObservations []CommitObservation
-		f                  int
-		expValidObs        []CommitObservation
-		expError           bool
-	}{
-		{
-			name:               "base",
-			commitObservations: []CommitObservation{ob1, ob2},
-			f:                  1,
-			expValidObs:        []CommitObservation{ob1, ob2},
-			expError:           false,
-		},
-		{
-			name:               "pass with f=2",
-			commitObservations: []CommitObservation{ob1, ob2, ob3},
-			f:                  2,
-			expValidObs:        []CommitObservation{ob1, ob2, ob3},
-			expError:           false,
-		},
-		{
-			name:               "tolerate 1 nil gas price with f=2",
-			commitObservations: []CommitObservation{ob1, ob2, ob3, obWithNilGasPrice},
-			f:                  2,
-			expValidObs:        []CommitObservation{ob1, ob2, ob3},
-			expError:           false,
-		},
-		{
-			name:               "tolerate 1 nil token price with f=1",
-			commitObservations: []CommitObservation{ob1, ob2, obWithNilTokenPrice},
-			f:                  1,
-			expValidObs:        []CommitObservation{ob1, ob2},
-			expError:           false,
-		},
-		{
-			name:               "tolerate 1 missing token prices with f=1",
-			commitObservations: []CommitObservation{ob1, ob2, obMissingTokenPrices},
-			f:                  1,
-			expValidObs:        []CommitObservation{ob1, ob2},
-			expError:           false,
-		},
-		{
-			name:               "tolerate 1 unsupported token with f=1",
-			commitObservations: []CommitObservation{ob1, ob2, obWithUnsupportedToken},
-			f:                  1,
-			expValidObs:        []CommitObservation{ob1, ob2},
-			expError:           false,
-		},
-		{
-			name:               "not enough valid observations",
-			commitObservations: []CommitObservation{ob1, ob2},
-			f:                  2,
-			expValidObs:        nil,
-			expError:           true,
-		},
-		{
-			name:               "too many faulty observations with f=2",
-			commitObservations: []CommitObservation{ob1, ob2, obMissingTokenPrices, obWithUnsupportedToken},
-			f:                  2,
-			expValidObs:        nil,
-			expError:           true,
-		},
-		{
-			name:               "too many faulty observations with f=1",
-			commitObservations: []CommitObservation{ob1, obEmpty},
-			f:                  1,
-			expValidObs:        nil,
-			expError:           true,
-		},
-		{
-			name:               "all faulty observations",
-			commitObservations: []CommitObservation{obWithNilGasPrice, obWithNilTokenPrice, obMissingTokenPrices, obWithUnsupportedToken, obEmpty},
-			f:                  1,
-			expValidObs:        nil,
-			expError:           true,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			obs, err := validateObservations(ctx, logger.TestLogger(t), tokenDecimals, tc.f, tc.commitObservations)
-
-			if tc.expError {
-				assert.Error(t, err)
-				return
-			}
-			assert.Equal(t, tc.expValidObs, obs)
-			assert.NoError(t, err)
-		})
-	}
-}
-
-func TestCommitReportingPlugin_calculatePriceUpdates(t *testing.T) {
-	const defaultSourceChainSelector = 10 // we reuse this value across all test cases
-	feeToken1 := common.HexToAddress("0xa")
-	feeToken2 := common.HexToAddress("0xb")
-
-	val1e18 := func(val int64) *big.Int { return new(big.Int).Mul(big.NewInt(1e18), big.NewInt(val)) }
-
-	testCases := []struct {
-		name                     string
-		commitObservations       []CommitObservation
-		f                        int
-		latestGasPrice           update
-		latestTokenPrices        map[common.Address]update
-		gasPriceHeartBeat        models.Duration
-		daGasPriceDeviationPPB   int64
-		execGasPriceDeviationPPB int64
-		tokenPriceHeartBeat      models.Duration
-		tokenPriceDeviationPPB   uint32
-		expTokenUpdates          []ccipdata.TokenPrice
-		expGasUpdates            []ccipdata.GasPrice
-	}{
-		{
-			name: "median",
-			commitObservations: []CommitObservation{
-				{SourceGasPriceUSD: big.NewInt(1)},
-				{SourceGasPriceUSD: big.NewInt(2)},
-				{SourceGasPriceUSD: big.NewInt(3)},
-				{SourceGasPriceUSD: big.NewInt(4)},
-			},
-			latestGasPrice: update{
-				timestamp: time.Now().Add(-30 * time.Minute), // recent
-				value:     val1e18(9),                        // median deviates
-			},
-			f:             2,
-			expGasUpdates: []ccipdata.GasPrice{{DestChainSelector: defaultSourceChainSelector, Value: big.NewInt(3)}},
-		},
-		{
-			name: "gas price update skipped because the latest is similar and was updated recently",
-			commitObservations: []CommitObservation{
-				{SourceGasPriceUSD: val1e18(10)},
-				{SourceGasPriceUSD: val1e18(11)},
-			},
-			gasPriceHeartBeat:        models.MustMakeDuration(time.Hour),
-			daGasPriceDeviationPPB:   20e7,
-			execGasPriceDeviationPPB: 20e7,
-			tokenPriceHeartBeat:      models.MustMakeDuration(time.Hour),
-			tokenPriceDeviationPPB:   20e7,
-			latestGasPrice: update{
-				timestamp: time.Now().Add(-30 * time.Minute), // recent
-				value:     val1e18(9),                        // latest value close to the update
-			},
-			f:             1,
-			expGasUpdates: nil,
-		},
-		{
-			name: "gas price update included, the latest is similar but was not updated recently",
-			commitObservations: []CommitObservation{
-				{SourceGasPriceUSD: val1e18(10)},
-				{SourceGasPriceUSD: val1e18(11)},
-			},
-			gasPriceHeartBeat:        models.MustMakeDuration(time.Hour),
-			daGasPriceDeviationPPB:   20e7,
-			execGasPriceDeviationPPB: 20e7,
-			tokenPriceHeartBeat:      models.MustMakeDuration(time.Hour),
-			tokenPriceDeviationPPB:   20e7,
-			latestGasPrice: update{
-				timestamp: time.Now().Add(-90 * time.Minute), // recent
-				value:     val1e18(9),                        // latest value close to the update
-			},
-			f:             1,
-			expGasUpdates: []ccipdata.GasPrice{{DestChainSelector: defaultSourceChainSelector, Value: val1e18(11)}},
-		},
-		{
-			name: "gas price update deviates from latest",
-			commitObservations: []CommitObservation{
-				{SourceGasPriceUSD: val1e18(10)},
-				{SourceGasPriceUSD: val1e18(20)},
-				{SourceGasPriceUSD: val1e18(20)},
-			},
-			gasPriceHeartBeat:        models.MustMakeDuration(time.Hour),
-			daGasPriceDeviationPPB:   20e7,
-			execGasPriceDeviationPPB: 20e7,
-			tokenPriceHeartBeat:      models.MustMakeDuration(time.Hour),
-			tokenPriceDeviationPPB:   20e7,
-			latestGasPrice: update{
-				timestamp: time.Now().Add(-30 * time.Minute), // recent
-				value:     val1e18(11),                       // latest value close to the update
-			},
-			f:             2,
-			expGasUpdates: []ccipdata.GasPrice{{DestChainSelector: defaultSourceChainSelector, Value: val1e18(20)}},
-		},
-		{
-			name: "median one token",
-			commitObservations: []CommitObservation{
-				{TokenPricesUSD: map[common.Address]*big.Int{feeToken1: big.NewInt(10)}, SourceGasPriceUSD: val1e18(0)},
-				{TokenPricesUSD: map[common.Address]*big.Int{feeToken1: big.NewInt(12)}, SourceGasPriceUSD: val1e18(0)},
-			},
-			f: 1,
-			expTokenUpdates: []ccipdata.TokenPrice{
-				{Token: feeToken1, Value: big.NewInt(12)},
-			},
-			// We expect a gas update because no latest
-			expGasUpdates: []ccipdata.GasPrice{{DestChainSelector: defaultSourceChainSelector, Value: big.NewInt(0)}},
-		},
-		{
-			name: "median two tokens",
-			commitObservations: []CommitObservation{
-				{TokenPricesUSD: map[common.Address]*big.Int{feeToken1: big.NewInt(10), feeToken2: big.NewInt(13)}, SourceGasPriceUSD: val1e18(0)},
-				{TokenPricesUSD: map[common.Address]*big.Int{feeToken1: big.NewInt(12), feeToken2: big.NewInt(7)}, SourceGasPriceUSD: val1e18(0)},
-			},
-			f: 1,
-			expTokenUpdates: []ccipdata.TokenPrice{
-				{Token: feeToken1, Value: big.NewInt(12)},
-				{Token: feeToken2, Value: big.NewInt(13)},
-			},
-			// We expect a gas update because no latest
-			expGasUpdates: []ccipdata.GasPrice{{DestChainSelector: defaultSourceChainSelector, Value: big.NewInt(0)}},
-		},
-		{
-			name: "token price update skipped because it is close to the latest",
-			commitObservations: []CommitObservation{
-				{TokenPricesUSD: map[common.Address]*big.Int{feeToken1: val1e18(10)}, SourceGasPriceUSD: val1e18(0)},
-				{TokenPricesUSD: map[common.Address]*big.Int{feeToken1: val1e18(11)}, SourceGasPriceUSD: val1e18(0)},
-			},
-			f:                        1,
-			gasPriceHeartBeat:        models.MustMakeDuration(time.Hour),
-			daGasPriceDeviationPPB:   20e7,
-			execGasPriceDeviationPPB: 20e7,
-			tokenPriceHeartBeat:      models.MustMakeDuration(time.Hour),
-			tokenPriceDeviationPPB:   20e7,
-			latestTokenPrices: map[common.Address]update{
-				feeToken1: {
-					timestamp: time.Now().Add(-30 * time.Minute),
-					value:     val1e18(9),
-				},
-			},
-			// We expect a gas update because no latest
-			expGasUpdates: []ccipdata.GasPrice{{DestChainSelector: defaultSourceChainSelector, Value: big.NewInt(0)}},
-		},
-		{
-			name: "gas price and token price both included because they are not close to the latest",
-			commitObservations: []CommitObservation{
-				{TokenPricesUSD: map[common.Address]*big.Int{feeToken1: val1e18(20)}, SourceGasPriceUSD: val1e18(10)},
-				{TokenPricesUSD: map[common.Address]*big.Int{feeToken1: val1e18(21)}, SourceGasPriceUSD: val1e18(11)},
-			},
-			f:                        1,
-			gasPriceHeartBeat:        models.MustMakeDuration(time.Hour),
-			daGasPriceDeviationPPB:   10e7,
-			execGasPriceDeviationPPB: 10e7,
-			tokenPriceHeartBeat:      models.MustMakeDuration(time.Hour),
-			tokenPriceDeviationPPB:   20e7,
-			latestGasPrice: update{
-				timestamp: time.Now().Add(-30 * time.Minute),
-				value:     val1e18(9),
-			},
-			latestTokenPrices: map[common.Address]update{
-				feeToken1: {
-					timestamp: time.Now().Add(-30 * time.Minute),
-					value:     val1e18(9),
-				},
-			},
-			expTokenUpdates: []ccipdata.TokenPrice{
-				{Token: feeToken1, Value: val1e18(21)},
-			},
-			expGasUpdates: []ccipdata.GasPrice{{DestChainSelector: defaultSourceChainSelector, Value: val1e18(11)}},
-		},
-		{
-			name: "gas price and token price both included because they not been updated recently",
-			commitObservations: []CommitObservation{
-				{TokenPricesUSD: map[common.Address]*big.Int{feeToken1: val1e18(20)}, SourceGasPriceUSD: val1e18(10)},
-				{TokenPricesUSD: map[common.Address]*big.Int{feeToken1: val1e18(21)}, SourceGasPriceUSD: val1e18(11)},
-			},
-			f:                        1,
-			gasPriceHeartBeat:        models.MustMakeDuration(time.Hour),
-			daGasPriceDeviationPPB:   10e7,
-			execGasPriceDeviationPPB: 10e7,
-			tokenPriceHeartBeat:      models.MustMakeDuration(2 * time.Hour),
-			tokenPriceDeviationPPB:   20e7,
-			latestGasPrice: update{
-				timestamp: time.Now().Add(-90 * time.Minute),
-				value:     val1e18(11),
-			},
-			latestTokenPrices: map[common.Address]update{
-				feeToken1: {
-					timestamp: time.Now().Add(-4 * time.Hour),
-					value:     val1e18(21),
-				},
-			},
-			expTokenUpdates: []ccipdata.TokenPrice{
-				{Token: feeToken1, Value: val1e18(21)},
-			},
-			expGasUpdates: []ccipdata.GasPrice{{DestChainSelector: defaultSourceChainSelector, Value: val1e18(11)}},
-		},
-		{
-			name: "gas price included because it deviates from latest and token price skipped because it does not deviate",
-			commitObservations: []CommitObservation{
-				{TokenPricesUSD: map[common.Address]*big.Int{feeToken1: val1e18(20)}, SourceGasPriceUSD: val1e18(10)},
-				{TokenPricesUSD: map[common.Address]*big.Int{feeToken1: val1e18(21)}, SourceGasPriceUSD: val1e18(11)},
-			},
-			f:                        1,
-			gasPriceHeartBeat:        models.MustMakeDuration(time.Hour),
-			daGasPriceDeviationPPB:   10e7,
-			execGasPriceDeviationPPB: 10e7,
-			tokenPriceHeartBeat:      models.MustMakeDuration(2 * time.Hour),
-			tokenPriceDeviationPPB:   200e7,
-			latestGasPrice: update{
-				timestamp: time.Now().Add(-30 * time.Minute),
-				value:     val1e18(9),
-			},
-			latestTokenPrices: map[common.Address]update{
-				feeToken1: {
-					timestamp: time.Now().Add(-30 * time.Minute),
-					value:     val1e18(9),
-				},
-			},
-			expGasUpdates: []ccipdata.GasPrice{{DestChainSelector: defaultSourceChainSelector, Value: val1e18(11)}},
-		},
-		{
-			name: "gas price skipped because it does not deviate and token price included because it has not been updated recently",
-			commitObservations: []CommitObservation{
-				{TokenPricesUSD: map[common.Address]*big.Int{feeToken1: val1e18(20)}, SourceGasPriceUSD: val1e18(10)},
-				{TokenPricesUSD: map[common.Address]*big.Int{feeToken1: val1e18(21)}, SourceGasPriceUSD: val1e18(11)},
-			},
-			f:                        1,
-			gasPriceHeartBeat:        models.MustMakeDuration(time.Hour),
-			daGasPriceDeviationPPB:   10e7,
-			execGasPriceDeviationPPB: 10e7,
-			tokenPriceHeartBeat:      models.MustMakeDuration(2 * time.Hour),
-			tokenPriceDeviationPPB:   20e7,
-			latestGasPrice: update{
-				timestamp: time.Now().Add(-30 * time.Minute),
-				value:     val1e18(11),
-			},
-			latestTokenPrices: map[common.Address]update{
-				feeToken1: {
-					timestamp: time.Now().Add(-4 * time.Hour),
-					value:     val1e18(21),
-				},
-			},
-			expTokenUpdates: []ccipdata.TokenPrice{
-				{Token: feeToken1, Value: val1e18(21)},
-			},
-			expGasUpdates: nil,
-		},
-	}
-
-	evmEstimator := mocks.NewEvmFeeEstimator(t)
-	evmEstimator.On("L1Oracle").Return(nil)
-	estimatorCSVer, _ := semver.NewVersion("1.2.0")
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			estimator, _ := prices.NewGasPriceEstimatorForCommitPlugin(
-				*estimatorCSVer,
-				evmEstimator,
-				nil,
-				tc.daGasPriceDeviationPPB,
-				tc.execGasPriceDeviationPPB,
-			)
-
-			r := &CommitReportingPlugin{
-				lggr:                logger.TestLogger(t),
-				sourceChainSelector: defaultSourceChainSelector,
-				offchainConfig: ccipdata.CommitOffchainConfig{
-					GasPriceHeartBeat:      tc.gasPriceHeartBeat.Duration(),
-					TokenPriceHeartBeat:    tc.tokenPriceHeartBeat.Duration(),
-					TokenPriceDeviationPPB: tc.tokenPriceDeviationPPB,
-				},
-				gasPriceEstimator: estimator,
-				F:                 tc.f,
-			}
-			gotTokens, gotGas, err := r.calculatePriceUpdates(tc.commitObservations, tc.latestGasPrice, tc.latestTokenPrices)
-
-			assert.Equal(t, tc.expGasUpdates, gotGas)
-			assert.Equal(t, tc.expTokenUpdates, gotTokens)
-			assert.NoError(t, err)
-		})
-	}
-}
-
-func TestCommitReportingPlugin_generatePriceUpdates(t *testing.T) {
-	val1e18 := func(val int64) *big.Int { return new(big.Int).Mul(big.NewInt(1e18), big.NewInt(val)) }
-
-	const nTokens = 10
-	tokens := make([]common.Address, nTokens)
-	for i := range tokens {
-		tokens[i] = utils.RandomAddress()
-	}
-	sort.Slice(tokens, func(i, j int) bool { return tokens[i].String() < tokens[j].String() })
-
-	testCases := []struct {
-		name                 string
-		tokenDecimals        map[common.Address]uint8
-		sourceNativeToken    common.Address
-		priceGetterRespData  map[common.Address]*big.Int
-		priceGetterRespErr   error
-		feeEstimatorRespFee  prices.GasPrice
-		feeEstimatorRespErr  error
-		maxGasPrice          uint64
-		expSourceGasPriceUSD *big.Int
-		expTokenPricesUSD    map[common.Address]*big.Int
-		expErr               bool
-	}{
-		{
-			name: "base",
-			tokenDecimals: map[common.Address]uint8{
-				tokens[0]: 18,
-				tokens[1]: 18,
-			},
-			sourceNativeToken: tokens[0],
-			priceGetterRespData: map[common.Address]*big.Int{
-				tokens[0]: val1e18(100),
-				tokens[1]: val1e18(200),
-				tokens[2]: val1e18(300), // price getter returned a price for this token even though we didn't request it (should be skipped)
-			},
-			priceGetterRespErr:   nil,
-			feeEstimatorRespFee:  big.NewInt(10),
-			feeEstimatorRespErr:  nil,
-			maxGasPrice:          1e18,
-			expSourceGasPriceUSD: big.NewInt(1000),
-			expTokenPricesUSD: map[common.Address]*big.Int{
-				tokens[0]: val1e18(100),
-				tokens[1]: val1e18(200),
-			},
-			expErr: false,
-		},
-		{
-			name: "price getter returned an error",
-			tokenDecimals: map[common.Address]uint8{
-				tokens[0]: 18,
-				tokens[1]: 18,
-			},
-			sourceNativeToken:   tokens[0],
-			priceGetterRespData: nil,
-			priceGetterRespErr:  fmt.Errorf("some random network error"),
-			expErr:              true,
-		},
-		{
-			name: "price getter skipped a requested price",
-			tokenDecimals: map[common.Address]uint8{
-				tokens[0]: 18,
-				tokens[1]: 18,
-			},
-			sourceNativeToken: tokens[0],
-			priceGetterRespData: map[common.Address]*big.Int{
-				tokens[0]: val1e18(100),
-			},
-			priceGetterRespErr: nil,
-			expErr:             true,
-		},
-		{
-			name: "price getter skipped source native price",
-			tokenDecimals: map[common.Address]uint8{
-				tokens[0]: 18,
-				tokens[1]: 18,
-			},
-			sourceNativeToken: tokens[2],
-			priceGetterRespData: map[common.Address]*big.Int{
-				tokens[0]: val1e18(100),
-				tokens[1]: val1e18(200),
-			},
-			priceGetterRespErr: nil,
-			expErr:             true,
-		},
-		{
-			name: "base",
-			tokenDecimals: map[common.Address]uint8{
-				tokens[0]: 18,
-				tokens[1]: 18,
-			},
-			sourceNativeToken: tokens[0],
-			priceGetterRespData: map[common.Address]*big.Int{
-				tokens[0]: val1e18(100),
-				tokens[1]: val1e18(200),
-				tokens[2]: val1e18(300), // price getter returned a price for this token even though we didn't request it
-			},
-			priceGetterRespErr:   nil,
-			feeEstimatorRespFee:  big.NewInt(10),
-			feeEstimatorRespErr:  nil,
-			maxGasPrice:          1e18,
-			expSourceGasPriceUSD: big.NewInt(1000),
-			expTokenPricesUSD: map[common.Address]*big.Int{
-				tokens[0]: val1e18(100),
-				tokens[1]: val1e18(200),
-			},
-			expErr: false,
-		},
-		{
-			name: "dynamic fee cap overrides legacy",
-			tokenDecimals: map[common.Address]uint8{
-				tokens[0]: 18,
-				tokens[1]: 18,
-			},
-			sourceNativeToken: tokens[0],
-			priceGetterRespData: map[common.Address]*big.Int{
-				tokens[0]: val1e18(100),
-				tokens[1]: val1e18(200),
-				tokens[2]: val1e18(300), // price getter returned a price for this token even though we didn't request it (should be skipped)
-			},
-			priceGetterRespErr:   nil,
-			feeEstimatorRespFee:  big.NewInt(20),
-			feeEstimatorRespErr:  nil,
-			maxGasPrice:          1e18,
-			expSourceGasPriceUSD: big.NewInt(2000),
-			expTokenPricesUSD: map[common.Address]*big.Int{
-				tokens[0]: val1e18(100),
-				tokens[1]: val1e18(200),
-			},
-			expErr: false,
-		},
-		{
-			name: "nil gas price",
-			tokenDecimals: map[common.Address]uint8{
-				tokens[0]: 18,
-				tokens[1]: 18,
-			},
-			sourceNativeToken: tokens[0],
-			priceGetterRespData: map[common.Address]*big.Int{
-				tokens[0]: val1e18(100),
-				tokens[1]: val1e18(200),
-				tokens[2]: val1e18(300), // price getter returned a price for this token even though we didn't request it (should be skipped)
-			},
-			feeEstimatorRespFee: nil,
-			maxGasPrice:         1e18,
-			expErr:              true,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			priceGetter := pricegetter.NewMockPriceGetter(t)
-			defer priceGetter.AssertExpectations(t)
-
-			gasPriceEstimator := prices.NewMockGasPriceEstimatorCommit(t)
-			defer gasPriceEstimator.AssertExpectations(t)
-
-			tokens := make([]common.Address, 0, len(tc.tokenDecimals))
-			for tk := range tc.tokenDecimals {
-				tokens = append(tokens, tk)
-			}
-			tokens = append(tokens, tc.sourceNativeToken)
-			sort.Slice(tokens, func(i, j int) bool { return tokens[i].String() < tokens[j].String() })
-
-			if len(tokens) > 0 {
-				priceGetter.On("TokenPricesUSD", mock.Anything, tokens).Return(tc.priceGetterRespData, tc.priceGetterRespErr)
-			}
-
-			if tc.maxGasPrice > 0 {
-				gasPriceEstimator.On("GetGasPrice", mock.Anything).Return(tc.feeEstimatorRespFee, tc.feeEstimatorRespErr)
-				if tc.feeEstimatorRespFee != nil {
-					var pUSD prices.GasPrice = ccipcalc.CalculateUsdPerUnitGas(tc.feeEstimatorRespFee, tc.expTokenPricesUSD[tc.sourceNativeToken])
-					gasPriceEstimator.On("DenoteInUSD", mock.Anything, mock.Anything).Return(pUSD, nil)
-				}
-			}
-
-			p := &CommitReportingPlugin{
-				sourceNative: tc.sourceNativeToken,
-				priceGetter:  priceGetter,
-				//offchainConfig:    ccipdata.CommitOffchainConfig{MaxGasPrice: tc.maxGasPrice},
-				gasPriceEstimator: gasPriceEstimator,
-			}
-
-			sourceGasPriceUSD, tokenPricesUSD, err := p.generatePriceUpdates(context.Background(), logger.TestLogger(t), tc.tokenDecimals)
-			if tc.expErr {
-				assert.Error(t, err)
-				return
-			}
-			assert.NoError(t, err)
-			assert.True(t, tc.expSourceGasPriceUSD.Cmp(sourceGasPriceUSD) == 0)
-			assert.True(t, reflect.DeepEqual(tc.expTokenPricesUSD, tokenPricesUSD))
-		})
-	}
-}
-
-func TestCommitReportingPlugin_nextMinSeqNum(t *testing.T) {
-	lggr := logger.TestLogger(t)
-	root1 := utils.Keccak256Fixed(hexutil.MustDecode("0xaa"))
-
-	var tt = []struct {
-		onChainMin          uint64
-		inflight            []ccipdata.CommitStoreReport
-		expectedOnChainMin  uint64
-		expectedInflightMin uint64
-	}{
-		{
-			onChainMin:          uint64(1),
-			inflight:            nil,
-			expectedInflightMin: uint64(1),
-			expectedOnChainMin:  uint64(1),
-		},
-		{
-			onChainMin: uint64(1),
-			inflight: []ccipdata.CommitStoreReport{
-				{Interval: ccipdata.CommitStoreInterval{Min: uint64(1), Max: uint64(2)}, MerkleRoot: root1}},
-			expectedInflightMin: uint64(3),
-			expectedOnChainMin:  uint64(1),
-		},
-		{
-			onChainMin: uint64(1),
-			inflight: []ccipdata.CommitStoreReport{
-				{Interval: ccipdata.CommitStoreInterval{Min: uint64(3), Max: uint64(4)}, MerkleRoot: root1}},
-			expectedInflightMin: uint64(5),
-			expectedOnChainMin:  uint64(1),
-		},
-		{
-			onChainMin: uint64(1),
-			inflight: []ccipdata.CommitStoreReport{
-				{Interval: ccipdata.CommitStoreInterval{Min: uint64(1), Max: uint64(MaxInflightSeqNumGap + 2)}, MerkleRoot: root1}},
-			expectedInflightMin: uint64(1),
-			expectedOnChainMin:  uint64(1),
-		},
-	}
-	for _, tc := range tt {
-		commitStoreReader := ccipdatamocks.NewCommitStoreReader(t)
-		commitStoreReader.On("GetExpectedNextSequenceNumber", mock.Anything).Return(tc.onChainMin, nil).Maybe()
-		cp := CommitReportingPlugin{commitStoreReader: commitStoreReader, inflightReports: newInflightCommitReportsContainer(time.Hour)}
-		epochAndRound := uint64(1)
-		for _, rep := range tc.inflight {
-			rc := rep
-			rc.GasPrices = []ccipdata.GasPrice{{}}
-			require.NoError(t, cp.inflightReports.add(lggr, rc, epochAndRound))
-			epochAndRound++
-		}
-		t.Log("inflight", cp.inflightReports.maxInflightSeqNr())
-		inflightMin, onchainMin, err := cp.nextMinSeqNum(context.Background(), lggr)
-		require.NoError(t, err)
-		assert.Equal(t, tc.expectedInflightMin, inflightMin)
-		assert.Equal(t, tc.expectedOnChainMin, onchainMin)
-		cp.inflightReports.reset(lggr)
-	}
-}
-
-func TestCommitReportingPlugin_isStaleReport(t *testing.T) {
-	ctx := context.Background()
-	lggr := logger.TestLogger(t)
-	merkleRoot1 := utils.Keccak256Fixed([]byte("some merkle root 1"))
-	merkleRoot2 := utils.Keccak256Fixed([]byte("some merkle root 2"))
-
-	t.Run("empty report", func(t *testing.T) {
-		commitStoreReader := ccipdatamocks.NewCommitStoreReader(t)
-		r := &CommitReportingPlugin{commitStoreReader: commitStoreReader}
-		isStale := r.isStaleReport(ctx, lggr, ccipdata.CommitStoreReport{}, false, types.ReportTimestamp{})
-		assert.True(t, isStale)
-	})
-
-	t.Run("merkle root", func(t *testing.T) {
-		const expNextSeqNum = uint64(9)
-		commitStoreReader := ccipdatamocks.NewCommitStoreReader(t)
-		commitStoreReader.On("GetExpectedNextSequenceNumber", mock.Anything).Return(expNextSeqNum, nil)
-
-		r := &CommitReportingPlugin{
-			commitStoreReader: commitStoreReader,
-			inflightReports: &inflightCommitReportsContainer{
-				inFlight: map[[32]byte]InflightCommitReport{
-					merkleRoot2: {
-						report: ccipdata.CommitStoreReport{
-							Interval: ccipdata.CommitStoreInterval{Min: expNextSeqNum + 1, Max: expNextSeqNum + 10},
-						},
-					},
-				},
-			},
-		}
-
-		assert.False(t, r.isStaleReport(ctx, lggr, ccipdata.CommitStoreReport{
-			MerkleRoot: merkleRoot1,
-			Interval:   ccipdata.CommitStoreInterval{Min: expNextSeqNum + 1, Max: expNextSeqNum + 10},
-		}, false, types.ReportTimestamp{}))
-
-		assert.True(t, r.isStaleReport(ctx, lggr, ccipdata.CommitStoreReport{
-			MerkleRoot: merkleRoot1,
-			Interval:   ccipdata.CommitStoreInterval{Min: expNextSeqNum + 1, Max: expNextSeqNum + 10},
-		}, true, types.ReportTimestamp{}))
-
-		assert.True(t, r.isStaleReport(ctx, lggr, ccipdata.CommitStoreReport{
-			MerkleRoot: merkleRoot1}, false, types.ReportTimestamp{}))
-	})
-}
-
-func TestCommitReportingPlugin_calculateMinMaxSequenceNumbers(t *testing.T) {
-	testCases := []struct {
-		name              string
-		commitStoreSeqNum uint64
-		inflightSeqNum    uint64
-		msgSeqNums        []uint64
-
-		expQueryMin uint64 // starting seq num that is used in the query to get messages
-		expMin      uint64
-		expMax      uint64
-		expErr      bool
-	}{
-		{
-			name:              "happy flow inflight",
-			commitStoreSeqNum: 9,
-			inflightSeqNum:    10,
-			msgSeqNums:        []uint64{11, 12, 13, 14},
-			expQueryMin:       11, // inflight+1
-			expMin:            11,
-			expMax:            14,
-			expErr:            false,
-		},
-		{
-			name:              "happy flow no inflight",
-			commitStoreSeqNum: 9,
-			msgSeqNums:        []uint64{11, 12, 13, 14},
-			expQueryMin:       9, // from commit store
-			expMin:            11,
-			expMax:            14,
-			expErr:            false,
-		},
-		{
-			name:              "gap in msg seq nums",
-			commitStoreSeqNum: 10,
-			inflightSeqNum:    9,
-			expQueryMin:       10,
-			msgSeqNums:        []uint64{11, 12, 14},
-			expErr:            true,
-		},
-		{
-			name:              "no new messages",
-			commitStoreSeqNum: 9,
-			msgSeqNums:        []uint64{},
-			expQueryMin:       9,
-			expMin:            0,
-			expMax:            0,
-			expErr:            false,
-		},
-		{
-			name:              "unordered seq nums",
-			commitStoreSeqNum: 9,
-			msgSeqNums:        []uint64{11, 13, 14, 10},
-			expQueryMin:       9,
-			expErr:            true,
-		},
-	}
-
-	ctx := testutils.Context(t)
-	lggr := logger.TestLogger(t)
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			p := &CommitReportingPlugin{}
-			commitStoreReader := ccipdatamocks.NewCommitStoreReader(t)
-			commitStoreReader.On("GetExpectedNextSequenceNumber", mock.Anything).Return(tc.commitStoreSeqNum, nil)
-			p.commitStoreReader = commitStoreReader
-
-			p.inflightReports = newInflightCommitReportsContainer(time.Minute)
-			if tc.inflightSeqNum > 0 {
-				p.inflightReports.inFlight[[32]byte{}] = InflightCommitReport{
-					report: ccipdata.CommitStoreReport{
-						Interval: ccipdata.CommitStoreInterval{
-							Min: tc.inflightSeqNum,
-							Max: tc.inflightSeqNum,
-						},
-					},
-				}
-			}
-
-			onRampReader := ccipdatamocks.NewOnRampReader(t)
-			var sendReqs []ccipdata.Event[internal.EVM2EVMMessage]
-			for _, seqNum := range tc.msgSeqNums {
-				sendReqs = append(sendReqs, ccipdata.Event[internal.EVM2EVMMessage]{
-					Data: internal.EVM2EVMMessage{
-						SequenceNumber: seqNum,
-					},
-				})
-			}
-			onRampReader.On("GetSendRequestsGteSeqNum", ctx, tc.expQueryMin, 0).Return(sendReqs, nil)
-			p.onRampReader = onRampReader
-
-			minSeqNum, maxSeqNum, err := p.calculateMinMaxSequenceNumbers(ctx, lggr)
-			if tc.expErr {
-				assert.Error(t, err)
-				return
-			}
-
-			assert.Equal(t, tc.expMin, minSeqNum)
-			assert.Equal(t, tc.expMax, maxSeqNum)
-		})
-	}
-}
-
-func TestCommitReportingPlugin_getLatestGasPriceUpdate(t *testing.T) {
-	now := time.Now()
-	chainSelector := uint64(1234)
-
-	testCases := []struct {
-		name                   string
-		checkInflight          bool
-		inflightGasPriceUpdate *update
-		destGasPriceUpdates    []update
-		expUpdate              update
-		expErr                 bool
-	}{
-		{
-			name:                   "only inflight gas price",
-			checkInflight:          true,
-			inflightGasPriceUpdate: &update{timestamp: now, value: big.NewInt(1000)},
-			expUpdate:              update{timestamp: now, value: big.NewInt(1000)},
-			expErr:                 false,
-		},
-		{
-			name:                   "inflight price is nil",
-			checkInflight:          true,
-			inflightGasPriceUpdate: nil,
-			destGasPriceUpdates: []update{
-				{timestamp: now.Add(time.Minute), value: big.NewInt(2000)},
-				{timestamp: now.Add(2 * time.Minute), value: big.NewInt(3000)},
-			},
-			expUpdate: update{timestamp: now.Add(2 * time.Minute), value: big.NewInt(3000)},
-			expErr:    false,
-		},
-		{
-			name:                   "inflight updates are skipped",
-			checkInflight:          false,
-			inflightGasPriceUpdate: &update{timestamp: now, value: big.NewInt(1000)},
-			destGasPriceUpdates: []update{
-				{timestamp: now.Add(time.Minute), value: big.NewInt(2000)},
-				{timestamp: now.Add(2 * time.Minute), value: big.NewInt(3000)},
-			},
-			expUpdate: update{timestamp: now.Add(2 * time.Minute), value: big.NewInt(3000)},
-			expErr:    false,
-		},
-	}
-
-	ctx := testutils.Context(t)
-	lggr := logger.TestLogger(t)
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			p := &CommitReportingPlugin{}
-			p.sourceChainSelector = chainSelector
-			p.inflightReports = newInflightCommitReportsContainer(time.Minute)
-			p.lggr = lggr
-			destPriceRegistry := ccipdatamocks.NewPriceRegistryReader(t)
-			p.destPriceRegistryReader = destPriceRegistry
-
-			if tc.inflightGasPriceUpdate != nil {
-				p.inflightReports.inFlightPriceUpdates = append(
-					p.inflightReports.inFlightPriceUpdates,
-					InflightPriceUpdate{
-						createdAt: tc.inflightGasPriceUpdate.timestamp,
-						gasPrices: []ccipdata.GasPrice{{
-							DestChainSelector: chainSelector,
-							Value:             tc.inflightGasPriceUpdate.value,
-						}},
-					},
-				)
-			}
-
-			if len(tc.destGasPriceUpdates) > 0 {
-				var events []ccipdata.Event[ccipdata.GasPriceUpdate]
-				for _, u := range tc.destGasPriceUpdates {
-					events = append(events, ccipdata.Event[ccipdata.GasPriceUpdate]{
-						Data: ccipdata.GasPriceUpdate{
-							GasPrice:         ccipdata.GasPrice{Value: u.value},
-							TimestampUnixSec: big.NewInt(u.timestamp.Unix()),
-						},
-					})
-				}
-				destReader := ccipdatamocks.NewPriceRegistryReader(t)
-				destReader.On("GetGasPriceUpdatesCreatedAfter", ctx, chainSelector, mock.Anything, 0).Return(events, nil)
-				p.destPriceRegistryReader = destReader
-			}
-
-			priceUpdate, err := p.getLatestGasPriceUpdate(ctx, time.Now(), tc.checkInflight)
-			if tc.expErr {
-				assert.Error(t, err)
-				return
-			}
-
-			assert.NoError(t, err)
-			assert.Equal(t, tc.expUpdate.timestamp.Truncate(time.Second), priceUpdate.timestamp.Truncate(time.Second))
-			assert.Equal(t, tc.expUpdate.value.Uint64(), priceUpdate.value.Uint64())
-		})
-	}
-}
-
-func TestCommitReportingPlugin_getLatestTokenPriceUpdates(t *testing.T) {
-	now := time.Now()
-	tk1 := utils.RandomAddress()
-	tk2 := utils.RandomAddress()
-
-	testCases := []struct {
-		name                 string
-		priceRegistryUpdates []ccipdata.TokenPriceUpdate
-		checkInflight        bool
-		inflightUpdates      map[common.Address]update
-		expUpdates           map[common.Address]update
-		expErr               bool
-	}{
-		{
-			name: "ignore inflight updates",
-			priceRegistryUpdates: []ccipdata.TokenPriceUpdate{
-				{
-					TokenPrice: ccipdata.TokenPrice{
-						Token: tk1,
-						Value: big.NewInt(1000),
-					},
-					TimestampUnixSec: big.NewInt(now.Add(1 * time.Minute).Unix()),
-				},
-				{
-					TokenPrice: ccipdata.TokenPrice{
-						Token: tk2,
-						Value: big.NewInt(2000),
-					},
-					TimestampUnixSec: big.NewInt(now.Add(2 * time.Minute).Unix()),
-				},
-			},
-			checkInflight: false,
-			expUpdates: map[common.Address]update{
-				tk1: {timestamp: now.Add(1 * time.Minute), value: big.NewInt(1000)},
-				tk2: {timestamp: now.Add(2 * time.Minute), value: big.NewInt(2000)},
-			},
-			expErr: false,
-		},
-		{
-			name: "consider inflight updates",
-			priceRegistryUpdates: []ccipdata.TokenPriceUpdate{
-				{
-					TokenPrice: ccipdata.TokenPrice{
-						Token: tk1,
-						Value: big.NewInt(1000),
-					},
-					TimestampUnixSec: big.NewInt(now.Add(1 * time.Minute).Unix()),
-				},
-				{
-					TokenPrice: ccipdata.TokenPrice{
-						Token: tk2,
-						Value: big.NewInt(2000),
-					},
-					TimestampUnixSec: big.NewInt(now.Add(2 * time.Minute).Unix()),
-				},
-			},
-			checkInflight: true,
-			inflightUpdates: map[common.Address]update{
-				tk1: {timestamp: now, value: big.NewInt(500)}, // inflight but older
-				tk2: {timestamp: now.Add(4 * time.Minute), value: big.NewInt(4000)},
-			},
-			expUpdates: map[common.Address]update{
-				tk1: {timestamp: now.Add(1 * time.Minute), value: big.NewInt(1000)},
-				tk2: {timestamp: now.Add(4 * time.Minute), value: big.NewInt(4000)},
-			},
-			expErr: false,
-		},
-	}
-
-	ctx := testutils.Context(t)
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			p := &CommitReportingPlugin{}
-
-			//_, priceRegAddr := testhelpers.NewFakePriceRegistry(t)
-			priceReg := ccipdatamocks.NewPriceRegistryReader(t)
-			p.destPriceRegistryReader = priceReg
-
-			//destReader := ccipdata.NewMockReader(t)
-			var events []ccipdata.Event[ccipdata.TokenPriceUpdate]
-			for _, up := range tc.priceRegistryUpdates {
-				events = append(events, ccipdata.Event[ccipdata.TokenPriceUpdate]{
-					Data: up,
-				})
-			}
-			//destReader.On("GetTokenPriceUpdatesCreatedAfter", ctx, priceRegAddr, mock.Anything, 0).Return(events, nil)
-			priceReg.On("GetTokenPriceUpdatesCreatedAfter", ctx, mock.Anything, 0).Return(events, nil)
-
-			p.inflightReports = newInflightCommitReportsContainer(time.Minute)
-			if len(tc.inflightUpdates) > 0 {
-				for tk, upd := range tc.inflightUpdates {
-					p.inflightReports.inFlightPriceUpdates = append(p.inflightReports.inFlightPriceUpdates, InflightPriceUpdate{
-						createdAt: upd.timestamp,
-						tokenPrices: []ccipdata.TokenPrice{
-							{Token: tk, Value: upd.value},
-						},
-					})
-				}
-			}
-
-			updates, err := p.getLatestTokenPriceUpdates(ctx, now, tc.checkInflight)
-			if tc.expErr {
-				assert.Error(t, err)
-				return
-			}
-			assert.NoError(t, err)
-			assert.Equal(t, len(tc.expUpdates), len(updates))
-			for k, v := range updates {
-				assert.Equal(t, tc.expUpdates[k].timestamp.Truncate(time.Second), v.timestamp.Truncate(time.Second))
-				assert.Equal(t, tc.expUpdates[k].value.Uint64(), v.value.Uint64())
-			}
-		})
-	}
-
-}
-
-func Test_commitReportSize(t *testing.T) {
+func TestCommitReportSize(t *testing.T) {
 	testParams := gopter.DefaultTestParameters()
 	testParams.MinSuccessfulTests = 100
 	p := gopter.NewProperties(testParams)
 	p.Property("bounded commit report size", prop.ForAll(func(root []byte, min, max uint64) bool {
 		var root32 [32]byte
 		copy(root32[:], root)
-		rep, err := ccipdata.EncodeCommitReport(ccipdata.CommitStoreReport{
-			MerkleRoot:  root32,
-			Interval:    ccipdata.CommitStoreInterval{Min: min, Max: max},
-			TokenPrices: []ccipdata.TokenPrice{},
-			GasPrices: []ccipdata.GasPrice{
-				{
-					DestChainSelector: 1337,
-					Value:             big.NewInt(2000e9), // $2000 per eth * 1gwei = 2000e9
-				},
+		rep, err := abihelpers.EncodeCommitReport(commit_store.CommitStoreCommitReport{
+			MerkleRoot: root32,
+			Interval:   commit_store.CommitStoreInterval{Min: min, Max: max},
+			PriceUpdates: commit_store.InternalPriceUpdates{
+				TokenPriceUpdates: []commit_store.InternalTokenPriceUpdate{},
+				DestChainSelector: 1337,
+				UsdPerUnitGas:     big.NewInt(2000e9), // $2000 per eth * 1gwei = 2000e9
 			},
 		})
 		require.NoError(t, err)
@@ -1572,29 +120,307 @@ func Test_commitReportSize(t *testing.T) {
 	p.TestingRun(t)
 }
 
-func Test_calculateIntervalConsensus(t *testing.T) {
+func TestCommitReportEncoding(t *testing.T) {
+	th := plugintesthelpers.SetupCCIPTestHarness(t)
+	newTokenPrice := big.NewInt(9e18) // $9
+	newGasPrice := big.NewInt(2000e9) // $2000 per eth * 1gwei
+
+	// Send a report.
+	mctx := hasher.NewKeccakCtx()
+	tree, err := merklemulti.NewTree(mctx, [][32]byte{mctx.Hash([]byte{0xaa})})
+	require.NoError(t, err)
+	report := commit_store.CommitStoreCommitReport{
+		PriceUpdates: commit_store.InternalPriceUpdates{
+			TokenPriceUpdates: []commit_store.InternalTokenPriceUpdate{
+				{
+					SourceToken: th.Dest.LinkToken.Address(),
+					UsdPerToken: newTokenPrice,
+				},
+			},
+			DestChainSelector: th.Source.ChainID,
+			UsdPerUnitGas:     newGasPrice,
+		},
+		MerkleRoot: tree.Root(),
+		Interval:   commit_store.CommitStoreInterval{Min: 1, Max: 10},
+	}
+	out, err := abihelpers.EncodeCommitReport(report)
+	require.NoError(t, err)
+	decodedReport, err := abihelpers.DecodeCommitReport(out)
+	require.NoError(t, err)
+	require.Equal(t, report, decodedReport)
+
+	latestEpocAndRound, err := th.Dest.CommitStoreHelper.GetLatestPriceEpochAndRound(nil)
+	require.NoError(t, err)
+
+	tx, err := th.Dest.CommitStoreHelper.Report(th.Dest.User, out, big.NewInt(int64(latestEpocAndRound+1)))
+	require.NoError(t, err)
+	th.CommitAndPollLogs(t)
+	res, err := th.Dest.Chain.TransactionReceipt(testutils.Context(t), tx.Hash())
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), res.Status)
+
+	// Ensure root exists.
+	ts, err := th.Dest.CommitStore.GetMerkleRoot(nil, tree.Root())
+	require.NoError(t, err)
+	require.NotEqual(t, ts.String(), "0")
+
+	// Ensure price update went through
+	destChainGasPrice, err := th.Dest.PriceRegistry.GetDestinationChainGasPrice(nil, th.Source.ChainID)
+	require.NoError(t, err)
+	assert.Equal(t, newGasPrice, destChainGasPrice.Value)
+
+	linkTokenPrice, err := th.Dest.PriceRegistry.GetTokenPrice(nil, th.Dest.LinkToken.Address())
+	require.NoError(t, err)
+	assert.Equal(t, newTokenPrice, linkTokenPrice.Value)
+}
+
+func TestCommitObservation(t *testing.T) {
+	th := setupCommitTestHarness(t)
+	th.plugin.F = 1
+
+	mb := th.GenerateAndSendMessageBatch(t, 1, 0, 0)
+
+	tests := []struct {
+		name            string
+		commitStoreDown bool
+		expected        *CommitObservation
+		expectedError   bool
+	}{
+		{
+			"base",
+			false,
+			&CommitObservation{
+				Interval:          mb.Interval,
+				SourceGasPriceUSD: new(big.Int).Mul(defaultGasPrice, big.NewInt(200)),
+				TokenPricesUSD: map[common.Address]*big.Int{
+					th.Dest.LinkToken.Address(): new(big.Int).Mul(big.NewInt(200), big.NewInt(1e18)),
+				},
+			},
+			false,
+		},
+		{
+			"commitStore down",
+			true,
+			nil,
+			true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.commitStoreDown && !isCommitStoreDownNow(testutils.Context(t), th.Lggr, th.Dest.CommitStore) {
+				_, err := th.Dest.CommitStore.Pause(th.Dest.User)
+				require.NoError(t, err)
+				th.CommitAndPollLogs(t)
+			} else if !tt.commitStoreDown && isCommitStoreDownNow(testutils.Context(t), th.Lggr, th.Dest.CommitStore) {
+				_, err := th.Dest.CommitStore.Unpause(th.Dest.User)
+				require.NoError(t, err)
+				th.CommitAndPollLogs(t)
+			}
+
+			gotObs, err := th.plugin.Observation(testutils.Context(t), types.ReportTimestamp{}, types.Query{})
+
+			if tt.expectedError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			var decodedObservation *CommitObservation
+			if gotObs != nil {
+				decodedObservation = new(CommitObservation)
+				err = json.Unmarshal(gotObs, decodedObservation)
+				require.NoError(t, err)
+
+			}
+			assert.Equal(t, tt.expected, decodedObservation)
+		})
+	}
+}
+
+func TestCommitReport(t *testing.T) {
+	th := setupCommitTestHarness(t)
+	th.plugin.F = 1
+
+	mb := th.GenerateAndSendMessageBatch(t, 1, 0, 0)
+
+	tests := []struct {
+		name          string
+		observations  []CommitObservation
+		shouldReport  bool
+		commitReport  *commit_store.CommitStoreCommitReport
+		expectedError bool
+	}{
+		{
+			"base",
+			[]CommitObservation{
+				{Interval: commit_store.CommitStoreInterval{Min: 1, Max: 1}},
+				{Interval: commit_store.CommitStoreInterval{Min: 1, Max: 1}},
+			},
+			true,
+			&commit_store.CommitStoreCommitReport{
+				MerkleRoot: mb.Root,
+				Interval:   commit_store.CommitStoreInterval{Min: 1, Max: 1},
+				PriceUpdates: commit_store.InternalPriceUpdates{
+					TokenPriceUpdates: []commit_store.InternalTokenPriceUpdate{},
+					DestChainSelector: 0,
+					UsdPerUnitGas:     new(big.Int),
+				},
+			},
+			false,
+		},
+		{
+			"not enough observations",
+			[]CommitObservation{
+				{Interval: commit_store.CommitStoreInterval{Min: 1, Max: 1}},
+			},
+			false,
+			nil,
+			true,
+		},
+		{
+			"empty",
+			[]CommitObservation{
+				{Interval: commit_store.CommitStoreInterval{Min: 0, Max: 0}},
+				{Interval: commit_store.CommitStoreInterval{Min: 0, Max: 0}},
+			},
+			false,
+			nil,
+			false,
+		},
+		{
+			"no leaves",
+			[]CommitObservation{
+				{Interval: commit_store.CommitStoreInterval{Min: 2, Max: 2}},
+				{Interval: commit_store.CommitStoreInterval{Min: 2, Max: 2}},
+			},
+			false,
+			nil,
+			true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			aos := make([]types.AttributedObservation, 0, len(tt.observations))
+			for _, o := range tt.observations {
+				obs, err := o.Marshal()
+				require.NoError(t, err)
+				aos = append(aos, types.AttributedObservation{Observation: obs})
+			}
+			gotShouldReport, gotReport, err := th.plugin.Report(testutils.Context(t), types.ReportTimestamp{}, types.Query{}, aos)
+
+			if tt.expectedError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tt.shouldReport, gotShouldReport)
+
+			var expectedReport types.Report
+			if tt.commitReport != nil {
+				expectedReport, err = abihelpers.EncodeCommitReport(*tt.commitReport)
+				require.NoError(t, err)
+			}
+			assert.Equal(t, expectedReport, gotReport)
+		})
+	}
+}
+
+func TestCalculatePriceUpdates(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name               string
+		commitObservations []CommitObservation
+		f                  int
+		wantGas            *big.Int
+	}{
+		{"median", []CommitObservation{
+			{SourceGasPriceUSD: big.NewInt(1)},
+			{SourceGasPriceUSD: big.NewInt(2)},
+			{SourceGasPriceUSD: big.NewInt(3)},
+			{SourceGasPriceUSD: big.NewInt(4)},
+		}, 2, big.NewInt(3)},
+		{"insufficient", []CommitObservation{
+			{SourceGasPriceUSD: nil}, {SourceGasPriceUSD: nil}, {SourceGasPriceUSD: big.NewInt(3)},
+		}, 1, big.NewInt(0)},
+		{"median including empties", []CommitObservation{
+			{SourceGasPriceUSD: nil}, {SourceGasPriceUSD: big.NewInt(1)}, {SourceGasPriceUSD: big.NewInt(2)},
+		}, 1, big.NewInt(2)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := calculatePriceUpdates(10, tt.commitObservations, tt.f)
+			assert.Equal(t, tt.wantGas, got.UsdPerUnitGas)
+		})
+	}
+	feeToken1 := common.HexToAddress("0xa")
+	feeToken2 := common.HexToAddress("0xb")
+	tokenPricesTests := []struct {
+		name               string
+		commitObservations []CommitObservation
+		f                  int
+		wantedUpdates      []commit_store.InternalTokenPriceUpdate
+	}{
+		{"median one token", []CommitObservation{
+			{TokenPricesUSD: map[common.Address]*big.Int{feeToken1: big.NewInt(10)}},
+			{TokenPricesUSD: map[common.Address]*big.Int{feeToken1: big.NewInt(12)}},
+		}, 1, []commit_store.InternalTokenPriceUpdate{
+			{SourceToken: feeToken1, UsdPerToken: big.NewInt(12)},
+		}},
+		{
+			"median two tokens", []CommitObservation{
+				{TokenPricesUSD: map[common.Address]*big.Int{feeToken1: big.NewInt(10), feeToken2: big.NewInt(13)}},
+				{TokenPricesUSD: map[common.Address]*big.Int{feeToken1: big.NewInt(12), feeToken2: big.NewInt(7)}},
+			}, 1, []commit_store.InternalTokenPriceUpdate{
+				{SourceToken: feeToken1, UsdPerToken: big.NewInt(12)},
+				{SourceToken: feeToken2, UsdPerToken: big.NewInt(13)},
+			},
+		},
+		{
+			"only one token with enough votes", []CommitObservation{
+				{TokenPricesUSD: map[common.Address]*big.Int{feeToken1: big.NewInt(10)}},
+				{TokenPricesUSD: map[common.Address]*big.Int{feeToken1: big.NewInt(12), feeToken2: big.NewInt(7)}},
+			}, 1, []commit_store.InternalTokenPriceUpdate{
+				{SourceToken: feeToken1, UsdPerToken: big.NewInt(12)},
+			},
+		},
+	}
+	for _, tt := range tokenPricesTests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := calculatePriceUpdates(10, tt.commitObservations, tt.f)
+			assert.Equal(t, tt.wantedUpdates, got.TokenPriceUpdates)
+		})
+	}
+}
+
+func TestCalculateIntervalConsensus(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name       string
-		intervals  []ccipdata.CommitStoreInterval
+		intervals  []commit_store.CommitStoreInterval
 		rangeLimit uint64
 		f          int
 		wantMin    uint64
 		wantMax    uint64
 		wantErr    bool
 	}{
-		{"no obs", []ccipdata.CommitStoreInterval{{Min: 0, Max: 0}}, 0, 0, 0, 0, false},
-		{"basic", []ccipdata.CommitStoreInterval{
+		{"no obs", []commit_store.CommitStoreInterval{{Min: 0, Max: 0}}, 0, 0, 0, 0, false},
+		{"basic", []commit_store.CommitStoreInterval{
 			{Min: 9, Max: 14},
 			{Min: 10, Max: 12},
 			{Min: 10, Max: 14},
 		}, 0, 1, 10, 14, false},
-		{"min > max", []ccipdata.CommitStoreInterval{
+		{"not enough intervals", []commit_store.CommitStoreInterval{}, 0, 1, 0, 0, true},
+		{"min > max", []commit_store.CommitStoreInterval{
 			{Min: 9, Max: 4},
 			{Min: 10, Max: 4},
 			{Min: 10, Max: 6},
 		}, 0, 1, 0, 0, true},
 		{
-			"range limit", []ccipdata.CommitStoreInterval{
+			"range limit", []commit_store.CommitStoreInterval{
 				{Min: 10, Max: 100},
 				{Min: 1, Max: 1000},
 			}, 256, 1, 10, 265, false,
@@ -1614,7 +440,145 @@ func Test_calculateIntervalConsensus(t *testing.T) {
 	}
 }
 
-func Test_calculateUsdPer1e18TokenAmount(t *testing.T) {
+func TestGeneratePriceUpdates(t *testing.T) {
+	th := setupCommitTestHarness(t)
+
+	fakePrices, err := th.plugin.config.priceGetter.TokenPricesUSD(testutils.Context(t), []common.Address{th.Dest.LinkToken.Address()}) // 2e20 hardcoded in fakePriceGetter
+	require.NoError(t, err)
+	fakePrice := fakePrices[th.Dest.LinkToken.Address()]
+
+	expectedGasPrice := new(big.Int).Mul(fakePrice, defaultGasPrice)
+	expectedGasPrice.Div(expectedGasPrice, big.NewInt(1e18))
+
+	newGasPrice := big.NewInt(106) // +6%, just outside the default deviation margin of ±5%
+	newGasPrice.Mul(newGasPrice, fakePrice)
+	newGasPrice.Div(newGasPrice, big.NewInt(100))
+
+	newExpectedGasPriceUSD := new(big.Int).Mul(newGasPrice, fakePrice)
+	newExpectedGasPriceUSD.Div(newExpectedGasPriceUSD, big.NewInt(1e18))
+
+	newFeeToken, _, _, err := link_token_interface.DeployLinkToken(th.Dest.User, th.Dest.Chain)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name                   string
+		addFeeTokens           []common.Address
+		updateTokenPricesUSD   map[common.Address]*big.Int
+		updateGasPriceUSD      *big.Int
+		updateGasPrice         *big.Int
+		expectedGasPriceUSD    *big.Int
+		expectedTokenPricesUSD map[common.Address]*big.Int
+	}{
+		{
+			name:                   "first update",
+			expectedGasPriceUSD:    expectedGasPrice,
+			expectedTokenPricesUSD: map[common.Address]*big.Int{th.Dest.LinkToken.Address(): fakePrice},
+		},
+		{
+			name:                   "gasPrice up-to-date",
+			updateGasPriceUSD:      expectedGasPrice,
+			expectedGasPriceUSD:    nil,
+			expectedTokenPricesUSD: map[common.Address]*big.Int{th.Dest.LinkToken.Address(): fakePrice},
+		},
+		{
+			name:                   "tokenPrice up-to-date, gasPrice deviated",
+			updateTokenPricesUSD:   map[common.Address]*big.Int{th.Dest.LinkToken.Address(): fakePrice},
+			updateGasPrice:         newGasPrice,
+			expectedGasPriceUSD:    newExpectedGasPriceUSD,
+			expectedTokenPricesUSD: map[common.Address]*big.Int{},
+		},
+		{
+			name:                   "new feeToken, getLatestTokenPriceUpdates returns nil",
+			addFeeTokens:           []common.Address{newFeeToken},
+			expectedGasPriceUSD:    newExpectedGasPriceUSD,
+			expectedTokenPricesUSD: map[common.Address]*big.Int{newFeeToken: fakePrice},
+		},
+	}
+
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if len(tt.addFeeTokens) > 0 {
+				_, err = th.Dest.PriceRegistry.ApplyFeeTokensUpdates(th.Dest.User, tt.addFeeTokens, []common.Address{})
+				require.NoError(t, err)
+				th.CommitAndPollLogs(t)
+			}
+			if len(tt.updateTokenPricesUSD) > 0 || tt.updateGasPriceUSD != nil {
+				destChainID := uint64(0)
+				if tt.updateGasPriceUSD != nil {
+					destChainID = th.Source.ChainID
+				} else {
+					tt.updateGasPriceUSD = big.NewInt(0)
+				}
+				tokenPriceUpdates := []price_registry.InternalTokenPriceUpdate{}
+				if len(tt.updateTokenPricesUSD) > 0 {
+					for token, value := range tt.updateTokenPricesUSD {
+						tokenPriceUpdates = append(tokenPriceUpdates, price_registry.InternalTokenPriceUpdate{SourceToken: token, UsdPerToken: value})
+					}
+				}
+				// update gasPrice in destPriceRegistry
+				_, err = th.Dest.PriceRegistry.UpdatePrices(th.Dest.User, price_registry.InternalPriceUpdates{
+					TokenPriceUpdates: tokenPriceUpdates,
+					DestChainSelector: destChainID,
+					UsdPerUnitGas:     tt.updateGasPriceUSD,
+				})
+				require.NoError(t, err)
+				th.CommitAndPollLogs(t)
+			}
+			if tt.updateGasPrice != nil {
+				th.mockedGetFee.Return(gas.EvmFee{Legacy: assets.NewWei(tt.updateGasPrice)}, uint32(200e3), nil)
+			}
+
+			gotGasPriceUSD, gotTokenPricesUSD, err := th.plugin.generatePriceUpdates(testutils.Context(t), th.Lggr, time.Unix(int64((i+1)*10), 0))
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectedGasPriceUSD, gotGasPriceUSD)
+			assert.Equal(t, tt.expectedTokenPricesUSD, gotTokenPricesUSD)
+		})
+	}
+}
+
+func TestUpdateTokenToDecimalMapping(t *testing.T) {
+	th := plugintesthelpers.SetupCCIPTestHarness(t)
+
+	destToken, _, _, err := link_token_interface.DeployLinkToken(th.Dest.User, th.Dest.Chain)
+	require.NoError(t, err)
+
+	feeToken, _, _, err := link_token_interface.DeployLinkToken(th.Dest.User, th.Dest.Chain)
+	require.NoError(t, err)
+	th.CommitAndPollLogs(t)
+
+	tokens := []common.Address{}
+	tokens = append(tokens, destToken)
+	tokens = append(tokens, feeToken)
+
+	mockOffRamp := &mock_contracts.EVM2EVMOffRampInterface{}
+	mockOffRamp.On("GetDestinationTokens", mock.Anything).Return([]common.Address{destToken}, nil)
+	mockOffRamp.On("Address").Return(common.Address{})
+
+	mockPriceRegistry := &mock_contracts.PriceRegistryInterface{}
+	mockPriceRegistry.On("GetFeeTokens", mock.Anything).Return([]common.Address{feeToken}, nil)
+	mockPriceRegistry.On("Address").Return(common.Address{})
+
+	backendClient := client.NewSimulatedBackendClient(t, th.Dest.Chain, new(big.Int).SetUint64(th.Dest.ChainID))
+	plugin := CommitReportingPlugin{
+		config: CommitPluginConfig{
+			offRamp:    mockOffRamp,
+			destClient: backendClient,
+		},
+		destPriceRegistry:     mockPriceRegistry,
+		tokenToDecimalMapping: cache.NewTokenToDecimals(th.Lggr, th.DestLP, mockOffRamp, mockPriceRegistry, backendClient, 0),
+	}
+
+	tokenMapping, err := plugin.tokenToDecimalMapping.Get(testutils.Context(t))
+	require.NoError(t, err)
+	assert.Equal(t, len(tokens), len(tokenMapping))
+	assert.Equal(t, uint8(18), tokenMapping[destToken])
+	assert.Equal(t, uint8(18), tokenMapping[feeToken])
+}
+
+func TestCalculateUsdPer1e18TokenAmount(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name       string
 		price      *big.Int
@@ -1654,8 +618,196 @@ func Test_calculateUsdPer1e18TokenAmount(t *testing.T) {
 	}
 }
 
+func TestShouldTransmitAcceptedReport(t *testing.T) {
+	th := setupCommitTestHarness(t)
+	tokenPrice := big.NewInt(9e18) // $9
+	gasPrice := big.NewInt(1500e9) // $1500 per eth * 1gwei
+
+	nextMinSeqNr := uint64(10)
+	_, err := th.Dest.CommitStore.SetMinSeqNr(th.Dest.User, nextMinSeqNr)
+	require.NoError(t, err)
+	_, err = th.Dest.PriceRegistry.UpdatePrices(th.Dest.User, price_registry.InternalPriceUpdates{
+		TokenPriceUpdates: []price_registry.InternalTokenPriceUpdate{
+			{SourceToken: th.Dest.LinkToken.Address(), UsdPerToken: tokenPrice},
+		},
+		DestChainSelector: th.Source.ChainID,
+		UsdPerUnitGas:     gasPrice,
+	})
+	require.NoError(t, err)
+	th.CommitAndPollLogs(t)
+	round := uint8(1)
+
+	tests := []struct {
+		name       string
+		seq        uint64
+		gasPrice   *big.Int
+		tokenPrice *big.Int
+		expected   bool
+	}{
+		{"base", nextMinSeqNr, nil, nil, true},
+		{"future", nextMinSeqNr + 10, nil, nil, true},
+		{"empty", 0, nil, nil, false},
+		{"gasPrice update", 0, big.NewInt(10), nil, true},
+		{"gasPrice stale", 0, gasPrice, nil, false},
+		{"tokenPrice update", 0, nil, big.NewInt(20), true},
+		{"tokenPrice stale", 0, nil, tokenPrice, false},
+		{"token price and gas price stale", 0, gasPrice, tokenPrice, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var destChainID uint64
+			gasPrice := new(big.Int)
+			if tt.gasPrice != nil {
+				destChainID = th.Source.ChainID
+				gasPrice = tt.gasPrice
+			}
+
+			var tokenPrices []commit_store.InternalTokenPriceUpdate
+			if tt.tokenPrice != nil {
+				tokenPrices = []commit_store.InternalTokenPriceUpdate{
+					{SourceToken: th.Dest.LinkToken.Address(), UsdPerToken: tt.tokenPrice},
+				}
+			} else {
+				tokenPrices = []commit_store.InternalTokenPriceUpdate{}
+			}
+
+			var root [32]byte
+			if tt.seq > 0 {
+				root = testutils.Random32Byte()
+			}
+
+			report, err := abihelpers.EncodeCommitReport(commit_store.CommitStoreCommitReport{
+				PriceUpdates: commit_store.InternalPriceUpdates{
+					TokenPriceUpdates: tokenPrices,
+					DestChainSelector: destChainID,
+					UsdPerUnitGas:     gasPrice,
+				},
+				MerkleRoot: root,
+				Interval:   commit_store.CommitStoreInterval{Min: tt.seq, Max: tt.seq},
+			})
+			require.NoError(t, err)
+
+			got, err := th.plugin.ShouldTransmitAcceptedReport(testutils.Context(t), types.ReportTimestamp{Epoch: 1, Round: round}, report)
+			round++
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, got)
+		})
+	}
+}
+
+func TestShouldAcceptFinalizedReport(t *testing.T) {
+	nextMinSeqNr := uint64(10)
+
+	tests := []struct {
+		name                     string
+		seq                      uint64
+		latestPriceEpochAndRound int64
+		epoch                    uint32
+		round                    uint8
+		destChainSelector        int
+		skipRoot                 bool
+		expected                 bool
+		err                      bool
+	}{
+		{
+			name:  "future",
+			seq:   nextMinSeqNr * 2,
+			epoch: 1,
+			round: 1,
+		},
+		{
+			name:  "empty",
+			epoch: 1,
+			round: 2,
+		},
+		{
+			name:  "stale",
+			seq:   nextMinSeqNr - 1,
+			epoch: 1,
+			round: 3,
+		},
+		{
+			name:     "base",
+			seq:      nextMinSeqNr,
+			epoch:    1,
+			round:    4,
+			expected: true,
+		},
+		{
+			name:                     "price update - epoch and round is ok",
+			seq:                      nextMinSeqNr,
+			latestPriceEpochAndRound: int64(mergeEpochAndRound(2, 10)),
+			epoch:                    2,
+			round:                    11,
+			destChainSelector:        rand.Int(),
+			skipRoot:                 true,
+			expected:                 true,
+		},
+		{
+			name:                     "price update - epoch and round is behind",
+			seq:                      nextMinSeqNr,
+			latestPriceEpochAndRound: int64(mergeEpochAndRound(2, 10)),
+			epoch:                    2,
+			round:                    9,
+			destChainSelector:        rand.Int(),
+			skipRoot:                 true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			th := setupCommitTestHarness(t)
+			_, err := th.Dest.CommitStore.SetMinSeqNr(th.Dest.User, nextMinSeqNr)
+			require.NoError(t, err)
+
+			_, err = th.Dest.CommitStoreHelper.SetLatestPriceEpochAndRound(th.Dest.User, big.NewInt(tt.latestPriceEpochAndRound))
+			require.NoError(t, err)
+
+			th.CommitAndPollLogs(t)
+
+			var root [32]byte
+			if tt.seq > 0 {
+				root = testutils.Random32Byte()
+			}
+
+			r := commit_store.CommitStoreCommitReport{
+				PriceUpdates: commit_store.InternalPriceUpdates{
+					TokenPriceUpdates: []commit_store.InternalTokenPriceUpdate{},
+					DestChainSelector: uint64(tt.destChainSelector),
+					UsdPerUnitGas:     new(big.Int),
+				},
+				Interval: commit_store.CommitStoreInterval{Min: tt.seq, Max: tt.seq},
+			}
+			if !tt.skipRoot {
+				r.MerkleRoot = root
+			}
+			report, err := abihelpers.EncodeCommitReport(r)
+			require.NoError(t, err)
+
+			got, err := th.plugin.ShouldAcceptFinalizedReport(
+				testutils.Context(t),
+				types.ReportTimestamp{Epoch: tt.epoch, Round: tt.round}, report)
+			if tt.err {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tt.expected, got)
+
+			if got { // already added to inflight, should not be accepted again
+				got, err = th.plugin.ShouldAcceptFinalizedReport(
+					testutils.Context(t),
+					types.ReportTimestamp{Epoch: tt.epoch, Round: tt.round}, report)
+				require.NoError(t, err)
+				assert.False(t, got)
+			}
+		})
+	}
+}
+
 func TestCommitReportToEthTxMeta(t *testing.T) {
-	mctx := hashlib.NewKeccakCtx()
+	mctx := hasher.NewKeccakCtx()
 	tree, err := merklemulti.NewTree(mctx, [][32]byte{mctx.Hash([]byte{0xaa})})
 	require.NoError(t, err)
 
@@ -1678,26 +830,125 @@ func TestCommitReportToEthTxMeta(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			report := ccipdata.CommitStoreReport{
-				TokenPrices: []ccipdata.TokenPrice{},
-				GasPrices: []ccipdata.GasPrice{
-					{
-						DestChainSelector: uint64(1337),
-						Value:             big.NewInt(2000e9), // $2000 per eth * 1gwei = 2000e9
-					},
+			report := commit_store.CommitStoreCommitReport{
+				PriceUpdates: commit_store.InternalPriceUpdates{
+					TokenPriceUpdates: []commit_store.InternalTokenPriceUpdate{},
+					DestChainSelector: uint64(1337),
+					UsdPerUnitGas:     big.NewInt(2000e9), // $2000 per eth * 1gwei = 2000e9
 				},
 				MerkleRoot: tree.Root(),
-				Interval:   ccipdata.CommitStoreInterval{Min: tc.min, Max: tc.max},
+				Interval:   commit_store.CommitStoreInterval{Min: tc.min, Max: tc.max},
 			}
-			out, err := ccipdata.EncodeCommitReport(report)
+			out, err := abihelpers.EncodeCommitReport(report)
 			require.NoError(t, err)
 
-			fn, err := ccipdata.CommitReportToEthTxMeta(ccipconfig.CommitStore, *semver.MustParse("1.0.0"))
-			require.NoError(t, err)
-			txMeta, err := fn(out)
+			txMeta, err := CommitReportToEthTxMeta(out)
 			require.NoError(t, err)
 			require.NotNil(t, txMeta)
 			require.EqualValues(t, tc.expectedRange, txMeta.SeqNumbers)
 		})
 	}
+}
+
+func TestNextMin(t *testing.T) {
+	lggr := logger.TestLogger(t)
+	commitStore := mock_contracts.CommitStoreInterface{}
+	cp := CommitReportingPlugin{config: CommitPluginConfig{commitStore: &commitStore}, inflightReports: newInflightCommitReportsContainer(time.Hour)}
+	root1 := utils.Keccak256Fixed(hexutil.MustDecode("0xaa"))
+	var tt = []struct {
+		onChainMin          uint64
+		inflight            []commit_store.CommitStoreCommitReport
+		expectedOnChainMin  uint64
+		expectedInflightMin uint64
+	}{
+		{
+			onChainMin:          uint64(1),
+			inflight:            nil,
+			expectedInflightMin: uint64(1),
+			expectedOnChainMin:  uint64(1),
+		},
+		{
+			onChainMin: uint64(1),
+			inflight: []commit_store.CommitStoreCommitReport{
+				{Interval: commit_store.CommitStoreInterval{Min: uint64(1), Max: uint64(2)}, MerkleRoot: root1}},
+			expectedInflightMin: uint64(3),
+			expectedOnChainMin:  uint64(1),
+		},
+		{
+			onChainMin: uint64(1),
+			inflight: []commit_store.CommitStoreCommitReport{
+				{Interval: commit_store.CommitStoreInterval{Min: uint64(3), Max: uint64(4)}, MerkleRoot: root1}},
+			expectedInflightMin: uint64(5),
+			expectedOnChainMin:  uint64(1),
+		},
+		{
+			onChainMin: uint64(1),
+			inflight: []commit_store.CommitStoreCommitReport{
+				{Interval: commit_store.CommitStoreInterval{Min: uint64(1), Max: uint64(MaxInflightSeqNumGap + 2)}, MerkleRoot: root1}},
+			expectedInflightMin: uint64(1),
+			expectedOnChainMin:  uint64(1),
+		},
+	}
+	for _, tc := range tt {
+		commitStore.On("GetExpectedNextSequenceNumber", mock.Anything).Return(tc.onChainMin, nil)
+		epochAndRound := uint64(1)
+		for _, rep := range tc.inflight {
+			rc := rep
+			require.NoError(t, cp.inflightReports.add(lggr, rc, epochAndRound))
+			epochAndRound++
+		}
+		t.Log("inflight", cp.inflightReports.maxInflightSeqNr())
+		inflightMin, onchainMin, err := cp.nextMinSeqNum(context.Background(), lggr)
+		require.NoError(t, err)
+		assert.Equal(t, tc.expectedInflightMin, inflightMin)
+		assert.Equal(t, tc.expectedOnChainMin, onchainMin)
+		cp.inflightReports.reset(lggr)
+	}
+}
+
+func Test_isStaleReport(t *testing.T) {
+	ctx := context.Background()
+	lggr := logger.TestLogger(t)
+	merkleRoot1 := utils.Keccak256Fixed([]byte("some merkle root 1"))
+	merkleRoot2 := utils.Keccak256Fixed([]byte("some merkle root 2"))
+
+	t.Run("empty report", func(t *testing.T) {
+		commitStore := mock_contracts.NewCommitStoreInterface(t)
+		r := &CommitReportingPlugin{config: CommitPluginConfig{commitStore: commitStore}}
+		isStale := r.isStaleReport(ctx, lggr, commit_store.CommitStoreCommitReport{}, false, types.ReportTimestamp{})
+		assert.True(t, isStale)
+	})
+
+	t.Run("merkle root", func(t *testing.T) {
+		const expNextSeqNum = uint64(9)
+
+		commitStore := mock_contracts.NewCommitStoreInterface(t)
+		commitStore.On("GetExpectedNextSequenceNumber", mock.Anything).Return(expNextSeqNum, nil)
+
+		r := &CommitReportingPlugin{
+			config: CommitPluginConfig{commitStore: commitStore},
+			inflightReports: &inflightCommitReportsContainer{
+				inFlight: map[[32]byte]InflightCommitReport{
+					merkleRoot2: {
+						report: commit_store.CommitStoreCommitReport{
+							Interval: commit_store.CommitStoreInterval{Min: expNextSeqNum + 1, Max: expNextSeqNum + 10},
+						},
+					},
+				},
+			},
+		}
+
+		assert.False(t, r.isStaleReport(ctx, lggr, commit_store.CommitStoreCommitReport{
+			MerkleRoot: merkleRoot1,
+			Interval:   commit_store.CommitStoreInterval{Min: expNextSeqNum + 1, Max: expNextSeqNum + 10},
+		}, false, types.ReportTimestamp{}))
+
+		assert.True(t, r.isStaleReport(ctx, lggr, commit_store.CommitStoreCommitReport{
+			MerkleRoot: merkleRoot1,
+			Interval:   commit_store.CommitStoreInterval{Min: expNextSeqNum + 1, Max: expNextSeqNum + 10},
+		}, true, types.ReportTimestamp{}))
+
+		assert.True(t, r.isStaleReport(ctx, lggr, commit_store.CommitStoreCommitReport{
+			MerkleRoot: merkleRoot1}, false, types.ReportTimestamp{}))
+	})
 }

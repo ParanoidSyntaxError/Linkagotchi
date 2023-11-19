@@ -18,14 +18,10 @@ type ICommitStoreCommitReport struct {
 	MerkleRoot   [32]byte
 }
 
-type InternalGasPriceUpdate struct {
-	DestChainSelector uint64
-	UsdPerUnitGas     *big.Int
-}
-
 type InternalPriceUpdates struct {
 	TokenPriceUpdates []InternalTokenPriceUpdate
-	GasPriceUpdates   []InternalGasPriceUpdate
+	DestChainId       uint64
+	UsdPerUnitGas     *big.Int
 }
 
 type InternalTokenPriceUpdate struct {
@@ -40,17 +36,16 @@ type ICommitStoreInterval struct {
 
 type InternalEVM2EVMMessage struct {
 	SourceChainSelector uint64
-	Sender              common.Address
-	Receiver            common.Address
 	SequenceNumber      uint64
+	FeeTokenAmount      *big.Int
+	Sender              common.Address
+	Nonce               uint64
 	GasLimit            *big.Int
 	Strict              bool
-	Nonce               uint64
-	FeeToken            common.Address
-	FeeTokenAmount      *big.Int
+	Receiver            common.Address
 	Data                []byte
 	TokenAmounts        []ClientEVMTokenAmount
-	SourceTokenData     [][]byte
+	FeeToken            common.Address
 	MessageId           [32]byte
 }
 

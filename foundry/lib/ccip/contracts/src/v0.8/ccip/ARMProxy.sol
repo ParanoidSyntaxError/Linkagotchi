@@ -1,16 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.19;
 
-import {ITypeAndVersion} from "../shared/interfaces/ITypeAndVersion.sol";
+import {TypeAndVersionInterface} from "../interfaces/TypeAndVersionInterface.sol";
+import {IARM} from "./interfaces/IARM.sol";
 
 import {OwnerIsCreator} from "./../shared/access/OwnerIsCreator.sol";
 
-/// @notice The ARMProxy serves to allow CCIP contracts
-/// to point to a static address for ARM queries, which saves gas
-/// since each contract need not store an ARM address in storage. That way
-/// we can add ARM queries along many code paths for increased defense in depth
-/// with minimal additional cost.
-contract ARMProxy is OwnerIsCreator, ITypeAndVersion {
+contract ARMProxy is OwnerIsCreator, TypeAndVersionInterface {
   error ZeroAddressNotAllowed();
 
   event ARMSet(address arm);
@@ -45,10 +41,8 @@ contract ARMProxy is OwnerIsCreator, ITypeAndVersion {
   // interface. Calling IARM interface methods in ARMProxy should be transparent, i.e.
   // their input/output behaviour should be identical to calling the proxied s_arm
   // contract directly. (If s_arm doesn't point to a contract, we always revert.)
-  // solhint-disable-next-line payable-fallback, no-complex-fallback
   fallback() external {
     address arm = s_arm;
-    // solhint-disable-next-line no-inline-assembly
     assembly {
       // Revert if no contract present at destination address, otherwise call
       // might succeed unintentionally.

@@ -1,12 +1,14 @@
 package toml
 
 import (
+	"crypto/tls"
 	_ "embed"
-	"errors"
 	"fmt"
 	"net"
 	"net/url"
 	"strings"
+
+	"github.com/pkg/errors"
 
 	"github.com/google/uuid"
 	"go.uber.org/multierr"
@@ -32,6 +34,7 @@ var ErrUnsupported = errors.New("unsupported with config v2")
 type Core struct {
 	// General/misc
 	AppID               uuid.UUID `toml:"-"` // random or test
+	ExplorerURL         *models.URL
 	InsecureFastScrypt  *bool
 	RootDir             *string
 	ShutdownGracePeriod *models.Duration
@@ -56,6 +59,9 @@ type Core struct {
 
 // SetFrom updates c with any non-nil values from f. (currently TOML field only!)
 func (c *Core) SetFrom(f *Core) {
+	if v := f.ExplorerURL; v != nil {
+		c.ExplorerURL = v
+	}
 	if v := f.InsecureFastScrypt; v != nil {
 		c.InsecureFastScrypt = v
 	}
@@ -97,12 +103,14 @@ func (c *Core) ValidateConfig() (err error) {
 }
 
 type Secrets struct {
-	Database   DatabaseSecrets          `toml:",omitempty"`
-	Password   Passwords                `toml:",omitempty"`
-	Pyroscope  PyroscopeSecrets         `toml:",omitempty"`
-	Prometheus PrometheusSecrets        `toml:",omitempty"`
-	Mercury    MercurySecrets           `toml:",omitempty"`
-	Threshold  ThresholdKeyShareSecrets `toml:",omitempty"`
+	Database         DatabaseSecrets          `toml:",omitempty"`
+	Explorer         ExplorerSecrets          `toml:",omitempty"`
+	Password         Passwords                `toml:",omitempty"`
+	Pyroscope        PyroscopeSecrets         `toml:",omitempty"`
+	Prometheus       PrometheusSecrets        `toml:",omitempty"`
+	Mercury          MercurySecrets           `toml:",omitempty"`
+	LegacyGasStation LegacyGasStationSecrets  `toml:",omitempty"`
+	Threshold        ThresholdKeyShareSecrets `toml:",omitempty"`
 }
 
 func dbURLPasswordComplexity(err error) string {
@@ -143,8 +151,6 @@ func validateDBURL(dbURI url.URL) error {
 func (d *DatabaseSecrets) ValidateConfig() (err error) {
 	if d.URL == nil || (*url.URL)(d.URL).String() == "" {
 		err = multierr.Append(err, configutils.ErrEmpty{Name: "URL", Msg: "must be provided and non-empty"})
-	} else if *d.AllowSimplePasswords && build.IsProd() {
-		err = multierr.Append(err, configutils.ErrInvalid{Name: "AllowSimplePasswords", Value: true, Msg: "insecure configs are not allowed on secure builds"})
 	} else if !*d.AllowSimplePasswords {
 		if verr := validateDBURL((url.URL)(*d.URL)); verr != nil {
 			err = multierr.Append(err, configutils.ErrInvalid{Name: "URL", Value: "*****", Msg: dbURLPasswordComplexity(verr)})
@@ -187,6 +193,39 @@ func (d *DatabaseSecrets) validateMerge(f *DatabaseSecrets) (err error) {
 
 	if d.URL != nil && f.URL != nil {
 		err = multierr.Append(err, configutils.ErrOverride{Name: "URL"})
+	}
+
+	return err
+}
+
+type ExplorerSecrets struct {
+	AccessKey *models.Secret
+	Secret    *models.Secret
+}
+
+func (e *ExplorerSecrets) SetFrom(f *ExplorerSecrets) (err error) {
+	err = e.validateMerge(f)
+	if err != nil {
+		return err
+	}
+
+	if v := f.AccessKey; v != nil {
+		e.AccessKey = v
+	}
+	if v := f.Secret; v != nil {
+		e.Secret = v
+	}
+
+	return nil
+}
+
+func (e *ExplorerSecrets) validateMerge(f *ExplorerSecrets) (err error) {
+	if e.AccessKey != nil && f.AccessKey != nil {
+		err = multierr.Append(err, configutils.ErrOverride{Name: "AccessKey"})
+	}
+
+	if e.Secret != nil && f.Secret != nil {
+		err = multierr.Append(err, configutils.ErrOverride{Name: "Secret"})
 	}
 
 	return err
@@ -283,10 +322,11 @@ func (p *PrometheusSecrets) validateMerge(f *PrometheusSecrets) (err error) {
 }
 
 type Feature struct {
-	FeedsManager *bool
-	LogPoller    *bool
-	UICSAKeys    *bool
-	CCIP         *bool
+	FeedsManager     *bool
+	LogPoller        *bool
+	UICSAKeys        *bool
+	CCIP             *bool
+	LegacyGasStation *bool
 }
 
 func (f *Feature) setFrom(f2 *Feature) {
@@ -301,6 +341,9 @@ func (f *Feature) setFrom(f2 *Feature) {
 	}
 	if v := f2.CCIP; v != nil {
 		f.CCIP = v
+	}
+	if v := f2.LegacyGasStation; v != nil {
+		f.LegacyGasStation = v
 	}
 }
 
@@ -426,22 +469,13 @@ func (d *DatabaseBackup) setFrom(f *DatabaseBackup) {
 type TelemetryIngress struct {
 	UniConn      *bool
 	Logging      *bool
+	ServerPubKey *string
+	URL          *models.URL
 	BufferSize   *uint16
 	MaxBatchSize *uint16
 	SendInterval *models.Duration
 	SendTimeout  *models.Duration
 	UseBatchSend *bool
-	Endpoints    []TelemetryIngressEndpoint `toml:",omitempty"`
-
-	URL          *models.URL `toml:",omitempty"` // Deprecated: Use TelemetryIngressEndpoint.URL instead, this field will be removed in future versions
-	ServerPubKey *string     `toml:",omitempty"` // Deprecated: Use TelemetryIngressEndpoint.ServerPubKey instead, this field will be removed in future versions
-}
-
-type TelemetryIngressEndpoint struct {
-	Network      *string
-	ChainID      *string
-	URL          *models.URL
-	ServerPubKey *string
 }
 
 func (t *TelemetryIngress) setFrom(f *TelemetryIngress) {
@@ -450,6 +484,12 @@ func (t *TelemetryIngress) setFrom(f *TelemetryIngress) {
 	}
 	if v := f.Logging; v != nil {
 		t.Logging = v
+	}
+	if v := f.ServerPubKey; v != nil {
+		t.ServerPubKey = v
+	}
+	if v := f.URL; v != nil {
+		t.URL = v
 	}
 	if v := f.BufferSize; v != nil {
 		t.BufferSize = v
@@ -466,29 +506,6 @@ func (t *TelemetryIngress) setFrom(f *TelemetryIngress) {
 	if v := f.UseBatchSend; v != nil {
 		t.UseBatchSend = v
 	}
-	if v := f.Endpoints; v != nil {
-		t.Endpoints = v
-	}
-	if v := f.ServerPubKey; v != nil {
-		t.ServerPubKey = v
-	}
-	if v := f.URL; v != nil {
-		t.URL = v
-	}
-}
-
-func (t *TelemetryIngress) ValidateConfig() (err error) {
-	if (!t.URL.IsZero() || *t.ServerPubKey != "") && len(t.Endpoints) > 0 {
-		return configutils.ErrInvalid{Name: "URL", Value: t.URL.String(),
-			Msg: `Cannot set both TelemetryIngress.URL and TelemetryIngress.ServerPubKey alongside TelemetryIngress.Endpoints. Please use only TelemetryIngress.Endpoints:
-			[[TelemetryIngress.Endpoints]]
-			Network = '...' # e.g. EVM. Solana, Starknet, Cosmos
-			ChainID = '...' # e.g. 1, 5, devnet, mainnet-beta
-			URL = '...'
-			ServerPubKey = '...'`}
-	}
-
-	return nil
 }
 
 type AuditLogger struct {
@@ -1207,13 +1224,8 @@ func (ins *Insecure) setFrom(f *Insecure) {
 }
 
 type MercuryCredentials struct {
-	// LegacyURL is the legacy base URL for mercury v0.2 API
-	LegacyURL *models.SecretURL
-	// URL is the base URL for mercury v0.3 API
-	URL *models.SecretURL
-	// Username is the user id for mercury credential
+	URL      *models.SecretURL
 	Username *models.Secret
-	// Password is the user secret key for mercury credential
 	Password *models.Secret
 }
 
@@ -1260,16 +1272,52 @@ func (m *MercurySecrets) ValidateConfig() (err error) {
 			err = multierr.Append(err, configutils.ErrMissing{Name: "URL", Msg: "must be provided and non-empty"})
 			continue
 		}
-		if creds.LegacyURL != nil && creds.LegacyURL.URL() == nil {
-			err = multierr.Append(err, configutils.ErrMissing{Name: "Legacy URL", Msg: "must be a valid URL"})
-			continue
-		}
 		s := creds.URL.URL().String()
 		if _, exists := urls[s]; exists {
 			err = multierr.Append(err, configutils.NewErrDuplicate("URL", s))
 		}
 		urls[s] = struct{}{}
 	}
+	return err
+}
+
+type LegacyGasStationAuthConfig struct {
+	// ClientKey is the X.509 private key used for mTLS in PEM (base64-encoding) format
+	ClientKey models.Secret
+	// ClientCertificate is the X.509 certificate for mTLS in PEM (base64-encoding) format
+	ClientCertificate models.Secret
+}
+
+type LegacyGasStationSecrets struct {
+	AuthConfig *LegacyGasStationAuthConfig
+}
+
+func (l *LegacyGasStationSecrets) SetFrom(s *LegacyGasStationSecrets) (err error) {
+	err = l.validateMerge(s)
+	if err != nil {
+		return err
+	}
+
+	if v := s.AuthConfig; v != nil {
+		l.AuthConfig = v
+	}
+	return nil
+}
+
+func (l *LegacyGasStationSecrets) validateMerge(s *LegacyGasStationSecrets) (err error) {
+	if l.AuthConfig != nil && s.AuthConfig != nil {
+		err = multierr.Append(err, configutils.ErrOverride{Name: "LegacyGasStationSecrets"})
+	}
+	return err
+}
+
+func (l *LegacyGasStationSecrets) ValidateConfig() (err error) {
+	if l.AuthConfig == nil {
+		// no validation needed
+		return nil
+	}
+	// validates private key and certificate match
+	_, err = tls.X509KeyPair([]byte(l.AuthConfig.ClientCertificate), []byte(l.AuthConfig.ClientKey))
 	return err
 }
 

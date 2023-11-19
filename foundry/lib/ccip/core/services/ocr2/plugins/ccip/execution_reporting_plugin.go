@@ -9,27 +9,33 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	gethtypes "github.com/ethereum/go-ethereum/core/types"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/pkg/errors"
 
 	"github.com/smartcontractkit/libocr/offchainreporting2plus/types"
 
+	"github.com/smartcontractkit/chainlink/v2/core/assets"
 	evmclient "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client"
 	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/gas"
 	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/logpoller"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/ccip/generated/evm_2_evm_offramp"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/commit_store"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/custom_token_pool"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/evm_2_evm_offramp"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/evm_2_evm_onramp"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/price_registry"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/router"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/internal"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/internal/cache"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/internal/ccipdata"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/internal/contractutil"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/internal/hashlib"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/internal/observability"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/prices"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/tokendata"
+	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/abihelpers"
+	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/cache"
+	ccipconfig "github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/config"
+	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/hasher"
+	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/observability"
+	"github.com/smartcontractkit/chainlink/v2/core/services/pg"
 )
 
 const (
@@ -45,116 +51,96 @@ var (
 	_ types.ReportingPlugin        = &ExecutionReportingPlugin{}
 )
 
-type ExecutionPluginStaticConfig struct {
+type ExecutionPluginConfig struct {
 	lggr                     logger.Logger
 	sourceLP, destLP         logpoller.LogPoller
-	onRampReader             ccipdata.OnRampReader
-	destReader               ccipdata.Reader
-	offRampReader            ccipdata.OffRampReader
-	commitStoreReader        ccipdata.CommitStoreReader
-	sourcePriceRegistry      ccipdata.PriceRegistryReader
+	onRamp                   evm_2_evm_onramp.EVM2EVMOnRampInterface
+	offRamp                  evm_2_evm_offramp.EVM2EVMOffRampInterface
+	commitStore              commit_store.CommitStoreInterface
+	sourcePriceRegistry      price_registry.PriceRegistryInterface
 	sourceWrappedNativeToken common.Address
 	destClient               evmclient.Client
-	sourceClient             evmclient.Client
-	destChainEVMID           *big.Int
 	destGasEstimator         gas.EvmFeeEstimator
-	tokenDataProviders       map[common.Address]tokendata.Reader
+	leafHasher               hasher.LeafHasherInterface[[32]byte]
 }
 
 type ExecutionReportingPlugin struct {
-	config ExecutionPluginStaticConfig
-
+	config                ExecutionPluginConfig
 	F                     int
 	lggr                  logger.Logger
 	inflightReports       *inflightExecReportsContainer
-	snoozedRoots          cache.SnoozedRoots
-	destPriceRegistry     ccipdata.PriceRegistryReader
+	snoozedRoots          map[[32]byte]time.Time
+	destPriceRegistry     price_registry.PriceRegistryInterface
 	destWrappedNative     common.Address
-	onchainConfig         ccipdata.ExecOnchainConfig
-	offchainConfig        ccipdata.ExecOffchainConfig
-	cachedSourceFeeTokens cache.AutoSync[[]common.Address]
-	cachedDestTokens      cache.AutoSync[cache.CachedTokens]
-	cachedTokenPools      cache.AutoSync[map[common.Address]common.Address]
-	gasPriceEstimator     prices.GasPriceEstimatorExec
+	onchainConfig         ccipconfig.ExecOnchainConfig
+	offchainConfig        ccipconfig.ExecOffchainConfig
+	cachedSourceFeeTokens *cache.CachedChain[[]common.Address]
+	cachedDestTokens      *cache.CachedChain[cache.CachedTokens]
 }
 
 type ExecutionReportingPluginFactory struct {
-	// Config derived from job specs and does not change between instances.
-	config ExecutionPluginStaticConfig
+	config ExecutionPluginConfig
 
-	destPriceRegReader ccipdata.PriceRegistryReader
-	destPriceRegAddr   common.Address
-	readersMu          *sync.Mutex
+	// We keep track of the registered filters
+	sourceChainFilters []logpoller.Filter
+	destChainFilters   []logpoller.Filter
+	filtersMu          *sync.Mutex
 }
 
-func NewExecutionReportingPluginFactory(config ExecutionPluginStaticConfig) *ExecutionReportingPluginFactory {
+func NewExecutionReportingPluginFactory(config ExecutionPluginConfig) *ExecutionReportingPluginFactory {
 	return &ExecutionReportingPluginFactory{
 		config:    config,
-		readersMu: &sync.Mutex{},
-
-		// the fields below are initially empty and populated on demand
-		destPriceRegReader: nil,
-		destPriceRegAddr:   common.Address{},
+		filtersMu: &sync.Mutex{},
 	}
-}
-
-func (rf *ExecutionReportingPluginFactory) UpdateDynamicReaders(newPriceRegAddr common.Address) error {
-	rf.readersMu.Lock()
-	defer rf.readersMu.Unlock()
-	// TODO: Investigate use of Close() to cleanup.
-	// TODO: a true price registry upgrade on an existing lane may want some kind of start block in its config? Right now we
-	// essentially assume that plugins don't care about historical price reg logs.
-	if rf.destPriceRegAddr == newPriceRegAddr {
-		// No-op
-		return nil
-	}
-	// Close old reader (if present) and open new reader if address changed.
-	if rf.destPriceRegReader != nil {
-		if err := rf.destPriceRegReader.Close(); err != nil {
-			return err
-		}
-	}
-	destPriceRegistryReader, err := ccipdata.NewPriceRegistryReader(rf.config.lggr, newPriceRegAddr, rf.config.destLP, rf.config.destClient)
-	if err != nil {
-		return err
-	}
-	destPriceRegistryReader = observability.NewPriceRegistryReader(destPriceRegistryReader, rf.config.destClient.ConfiguredChainID().Int64(), ExecPluginLabel)
-	rf.destPriceRegReader = destPriceRegistryReader
-	rf.destPriceRegAddr = newPriceRegAddr
-	return nil
 }
 
 func (rf *ExecutionReportingPluginFactory) NewReportingPlugin(config types.ReportingPluginConfig) (types.ReportingPlugin, types.ReportingPluginInfo, error) {
-	destPriceRegistry, destWrappedNative, err := rf.config.offRampReader.ChangeConfig(config.OnchainConfig, config.OffchainConfig)
+	ctx := context.TODO()
+
+	onchainConfig, err := abihelpers.DecodeAbiStruct[ccipconfig.ExecOnchainConfig](config.OnchainConfig)
 	if err != nil {
 		return nil, types.ReportingPluginInfo{}, err
 	}
-	// Open dynamic readers
-	err = rf.UpdateDynamicReaders(destPriceRegistry)
+	offchainConfig, err := ccipconfig.DecodeOffchainConfig[ccipconfig.ExecOffchainConfig](config.OffchainConfig)
+	if err != nil {
+		return nil, types.ReportingPluginInfo{}, err
+	}
+	priceRegistry, err := observability.NewObservedPriceRegistry(onchainConfig.PriceRegistry, ExecPluginLabel, rf.config.destClient)
+	if err != nil {
+		return nil, types.ReportingPluginInfo{}, err
+	}
+	destRouter, err := router.NewRouter(onchainConfig.Router, rf.config.destClient)
+	if err != nil {
+		return nil, types.ReportingPluginInfo{}, err
+	}
+	destWrappedNative, err := destRouter.GetWrappedNative(&bind.CallOpts{Context: ctx})
 	if err != nil {
 		return nil, types.ReportingPluginInfo{}, err
 	}
 
-	offchainConfig := rf.config.offRampReader.OffchainConfig()
+	// TODO Missing pg.QOpts
+	if err = rf.UpdateLogPollerFilters(onchainConfig.PriceRegistry); err != nil {
+		return nil, types.ReportingPluginInfo{}, err
+	}
+
 	cachedSourceFeeTokens := cache.NewCachedFeeTokens(rf.config.sourceLP, rf.config.sourcePriceRegistry, int64(offchainConfig.SourceFinalityDepth))
-	cachedDestTokens := cache.NewCachedSupportedTokens(rf.config.destLP, rf.config.offRampReader, rf.destPriceRegReader, int64(offchainConfig.DestOptimisticConfirmations))
-
-	cachedTokenPools := cache.NewTokenPools(rf.config.lggr, rf.config.destLP, rf.config.offRampReader, int64(offchainConfig.DestOptimisticConfirmations), 5)
+	cachedDestTokens := cache.NewCachedSupportedTokens(rf.config.destLP, rf.config.offRamp, priceRegistry, int64(offchainConfig.DestOptimisticConfirmations))
+	rf.config.lggr.Infow("Starting exec plugin",
+		"offchainConfig", offchainConfig,
+		"onchainConfig", onchainConfig)
 
 	return &ExecutionReportingPlugin{
 			config:                rf.config,
 			F:                     config.F,
 			lggr:                  rf.config.lggr.Named("ExecutionReportingPlugin"),
-			snoozedRoots:          cache.NewSnoozedRoots(rf.config.offRampReader.OnchainConfig().PermissionLessExecutionThresholdSeconds, offchainConfig.RootSnoozeTime.Duration()),
+			snoozedRoots:          make(map[[32]byte]time.Time),
 			inflightReports:       newInflightExecReportsContainer(offchainConfig.InflightCacheExpiry.Duration()),
-			destPriceRegistry:     rf.destPriceRegReader,
+			destPriceRegistry:     priceRegistry,
 			destWrappedNative:     destWrappedNative,
-			onchainConfig:         rf.config.offRampReader.OnchainConfig(),
+			onchainConfig:         onchainConfig,
 			offchainConfig:        offchainConfig,
 			cachedDestTokens:      cachedDestTokens,
 			cachedSourceFeeTokens: cachedSourceFeeTokens,
-			cachedTokenPools:      cachedTokenPools,
-			gasPriceEstimator:     rf.config.offRampReader.GasPriceEstimator(),
 		}, types.ReportingPluginInfo{
 			Name: "CCIPExecution",
 			// Setting this to false saves on calldata since OffRamp doesn't require agreement between NOPs
@@ -173,11 +159,7 @@ func (r *ExecutionReportingPlugin) Query(context.Context, types.ReportTimestamp)
 
 func (r *ExecutionReportingPlugin) Observation(ctx context.Context, timestamp types.ReportTimestamp, query types.Query) (types.Observation, error) {
 	lggr := r.lggr.Named("ExecutionObservation")
-	down, err := r.config.commitStoreReader.IsDown(ctx)
-	if err != nil {
-		return nil, errors.Wrap(err, "isDown check errored")
-	}
-	if down {
+	if isCommitStoreDownNow(ctx, lggr, r.config.commitStore) {
 		return nil, ErrCommitStoreIsDown
 	}
 	// Expire any inflight reports.
@@ -185,7 +167,7 @@ func (r *ExecutionReportingPlugin) Observation(ctx context.Context, timestamp ty
 	inFlight := r.inflightReports.getAll()
 
 	observationBuildStart := time.Now()
-
+	// IMPORTANT: We build executable set based on the leaders token prices, ensuring consistency across followers.
 	executableObservations, err := r.getExecutableObservations(ctx, lggr, timestamp, inFlight)
 	measureObservationBuildDuration(timestamp, time.Since(observationBuildStart))
 	if err != nil {
@@ -210,11 +192,51 @@ func (r *ExecutionReportingPlugin) Observation(ctx context.Context, timestamp ty
 	return NewExecutionObservation(executableObservations).Marshal()
 }
 
+// UpdateLogPollerFilters updates the log poller filters for the source and destination chains.
+// pass zeroAddress if dstPriceRegistry is unknown, filters with zero address are omitted.
+func (rf *ExecutionReportingPluginFactory) UpdateLogPollerFilters(destPriceRegistry common.Address, qopts ...pg.QOpt) error {
+	rf.filtersMu.Lock()
+	defer rf.filtersMu.Unlock()
+
+	// source chain filters
+	sourceFiltersBefore, sourceFiltersNow := rf.sourceChainFilters, getExecutionPluginSourceLpChainFilters(rf.config.onRamp.Address(), rf.config.sourcePriceRegistry.Address())
+	created, deleted := filtersDiff(sourceFiltersBefore, sourceFiltersNow)
+	if err := unregisterLpFilters(rf.config.sourceLP, deleted, qopts...); err != nil {
+		return err
+	}
+	if err := registerLpFilters(rf.config.sourceLP, created, qopts...); err != nil {
+		return err
+	}
+	rf.sourceChainFilters = sourceFiltersNow
+
+	// destination chain filters
+	destFiltersBefore, destFiltersNow := rf.destChainFilters, getExecutionPluginDestLpChainFilters(rf.config.commitStore.Address(), rf.config.offRamp.Address(), destPriceRegistry)
+	created, deleted = filtersDiff(destFiltersBefore, destFiltersNow)
+	if err := unregisterLpFilters(rf.config.destLP, deleted, qopts...); err != nil {
+		return err
+	}
+	if err := registerLpFilters(rf.config.destLP, created, qopts...); err != nil {
+		return err
+	}
+	rf.destChainFilters = destFiltersNow
+
+	return nil
+}
+
+// helper struct to hold the send request and some metadata
+type evm2EVMOnRampCCIPSendRequestedWithMeta struct {
+	evm_2_evm_offramp.InternalEVM2EVMMessage
+	blockTimestamp time.Time
+	executed       bool
+	finalized      bool
+}
+
 func (r *ExecutionReportingPlugin) getExecutableObservations(ctx context.Context, lggr logger.Logger, timestamp types.ReportTimestamp, inflight []InflightInternalExecutionReport) ([]ObservedMessage, error) {
 	unexpiredReports, err := getUnexpiredCommitReports(
 		ctx,
-		r.config.commitStoreReader,
-		r.onchainConfig.PermissionLessExecutionThresholdSeconds,
+		r.config.destLP,
+		r.config.commitStore,
+		r.onchainConfig.PermissionLessExecutionThresholdDuration(),
 	)
 	if err != nil {
 		return nil, err
@@ -229,29 +251,29 @@ func (r *ExecutionReportingPlugin) getExecutableObservations(ctx context.Context
 	// Since this will only increase over time, the highest observed value will
 	// always be the lower bound of what would be available on chain
 	// since we already account for inflight txs.
-	getAllowedTokenAmount := cache.LazyFetch(func() (evm_2_evm_offramp.RateLimiterTokenBucket, error) {
-		return r.config.offRampReader.CurrentRateLimiterState(ctx)
+	getAllowedTokenAmount := LazyFetch(func() (evm_2_evm_offramp.RateLimiterTokenBucket, error) {
+		return r.config.offRamp.CurrentRateLimiterState(&bind.CallOpts{Context: ctx})
 	})
 	sourceToDestTokens, supportedDestTokens, err := r.sourceDestinationTokens(ctx)
 	if err != nil {
 		return nil, err
 	}
-	getSourceTokensPrices := cache.LazyFetch(func() (map[common.Address]*big.Int, error) {
+	getSourceTokensPrices := LazyFetch(func() (map[common.Address]*big.Int, error) {
 		sourceFeeTokens, err1 := r.cachedSourceFeeTokens.Get(ctx)
 		if err1 != nil {
 			return nil, err1
 		}
 		return getTokensPrices(ctx, sourceFeeTokens, r.config.sourcePriceRegistry, []common.Address{r.config.sourceWrappedNativeToken})
 	})
-	getDestTokensPrices := cache.LazyFetch(func() (map[common.Address]*big.Int, error) {
+	getDestTokensPrices := LazyFetch(func() (map[common.Address]*big.Int, error) {
 		dstTokens, err1 := r.cachedDestTokens.Get(ctx)
 		if err1 != nil {
 			return nil, err1
 		}
 		return getTokensPrices(ctx, dstTokens.FeeTokens, r.destPriceRegistry, append(supportedDestTokens, r.destWrappedNative))
 	})
-	getDestGasPrice := cache.LazyFetch(func() (prices.GasPrice, error) {
-		return r.gasPriceEstimator.GetGasPrice(ctx)
+	getDestGasPrice := LazyFetch(func() (*big.Int, error) {
+		return r.estimateDestinationGasPrice(ctx)
 	})
 
 	lggr.Infow("Processing unexpired reports", "n", len(unexpiredReports))
@@ -266,7 +288,7 @@ func (r *ExecutionReportingPlugin) getExecutableObservations(ctx context.Context
 		return nil, err
 	}
 
-	getDestPoolRateLimits := cache.LazyFetch(func() (map[common.Address]*big.Int, error) {
+	getDestPoolRateLimits := LazyFetch(func() (map[common.Address]*big.Int, error) {
 		return r.destPoolRateLimits(ctx, unexpiredReportsWithSendReqs, sourceToDestTokens)
 	})
 
@@ -283,7 +305,8 @@ func (r *ExecutionReportingPlugin) getExecutableObservations(ctx context.Context
 			"maxSeqNr", rep.commitReport.Interval.Max,
 		)
 
-		if r.snoozedRoots.IsSnoozed(merkleRoot) {
+		snoozeUntil, haveSnoozed := r.snoozedRoots[merkleRoot]
+		if haveSnoozed && time.Now().Before(snoozeUntil) {
 			rootLggr.Debug("Skipping snoozed root")
 			continue
 		}
@@ -297,12 +320,12 @@ func (r *ExecutionReportingPlugin) getExecutableObservations(ctx context.Context
 		// config.PermissionLessExecutionThresholdSeconds so it will never be considered again.
 		if allMsgsExecutedAndFinalized := rep.allRequestsAreExecutedAndFinalized(); allMsgsExecutedAndFinalized {
 			rootLggr.Infof("Snoozing root %s forever since there are no executable txs anymore", hex.EncodeToString(merkleRoot[:]))
-			r.snoozedRoots.MarkAsExecuted(merkleRoot)
+			r.snoozedRoots[merkleRoot] = time.Now().Add(r.onchainConfig.PermissionLessExecutionThresholdDuration())
 			incSkippedRequests(reasonAllExecuted)
 			continue
 		}
 
-		blessed, err := r.config.commitStoreReader.IsBlessed(ctx, merkleRoot)
+		blessed, err := r.config.commitStore.IsBlessed(&bind.CallOpts{Context: ctx}, merkleRoot)
 		if err != nil {
 			return nil, err
 		}
@@ -332,89 +355,67 @@ func (r *ExecutionReportingPlugin) getExecutableObservations(ctx context.Context
 		}
 
 		buildBatchDuration := time.Now()
-		batch := r.buildBatch(
-			ctx,
-			rootLggr,
-			rep,
-			inflight,
-			allowedTokenAmountValue.Tokens,
-			sourceTokensPricesValue,
-			destTokensPricesValue,
-			getDestGasPrice,
-			sourceToDestTokens,
-			destPoolRateLimits)
+		batch := r.buildBatch(rootLggr, rep, inflight, allowedTokenAmountValue.Tokens,
+			sourceTokensPricesValue, destTokensPricesValue, getDestGasPrice, sourceToDestTokens, destPoolRateLimits)
 		measureBatchBuildDuration(timestamp, time.Since(buildBatchDuration))
 		if len(batch) != 0 {
 			return batch, nil
 		}
-		r.snoozedRoots.Snooze(merkleRoot)
+		r.snoozedRoots[merkleRoot] = time.Now().Add(r.offchainConfig.RootSnoozeTime.Duration())
 	}
 	return []ObservedMessage{}, nil
 }
 
-// destPoolRateLimits returns a map that consists of the rate limits of each destination token of the provided reports.
-// If a token is missing from the returned map it either means that token was not found or token pool is disabled for this token.
 func (r *ExecutionReportingPlugin) destPoolRateLimits(ctx context.Context, commitReports []commitReportWithSendRequests, sourceToDestToken map[common.Address]common.Address) (map[common.Address]*big.Int, error) {
-	tokenPools, err := r.cachedTokenPools.Get(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("get cached token pools: %w", err)
-	}
-
-	dstTokenToPool := make(map[common.Address]common.Address)
-	dstPoolToToken := make(map[common.Address]common.Address)
-	dstPools := make([]common.Address, 0)
-
+	dstTokens := make(map[common.Address]struct{}) // todo: replace with a set or uniqueSlice data structure
 	for _, msg := range commitReports {
 		for _, req := range msg.sendRequestsWithMeta {
 			for _, tk := range req.TokenAmounts {
-				dstToken, exists := sourceToDestToken[tk.Token]
-				if !exists {
-					r.lggr.Warnw("token not found on destination chain", "sourceToken", tk)
+				if dstToken, exists := sourceToDestToken[tk.Token]; exists {
+					dstTokens[dstToken] = struct{}{}
 					continue
 				}
-
-				// another message with the same token exists in the report
-				// we skip it since we don't want to query for the rate limit twice
-				if _, seen := dstTokenToPool[dstToken]; seen {
-					continue
-				}
-
-				poolAddress, exists := tokenPools[dstToken]
-				if !exists {
-					return nil, fmt.Errorf("pool for token '%s' does not exist", dstToken)
-				}
-
-				if tokenAddr, seen := dstPoolToToken[poolAddress]; seen {
-					return nil, fmt.Errorf("pool is already seen for token %s", tokenAddr)
-				}
-
-				dstTokenToPool[dstToken] = poolAddress
-				dstPoolToToken[poolAddress] = dstToken
-				dstPools = append(dstPools, poolAddress)
+				r.lggr.Warnw("token not found on destination chain", "sourceToken", tk)
 			}
 		}
 	}
 
-	rateLimits, err := r.config.offRampReader.GetTokenPoolsRateLimits(ctx, dstPools)
-	if err != nil {
-		return nil, fmt.Errorf("fetch pool rate limits: %w", err)
-	}
+	res := make(map[common.Address]*big.Int, len(dstTokens))
 
-	res := make(map[common.Address]*big.Int, len(dstTokenToPool))
-	for i, rateLimit := range rateLimits {
-		// if the rate limit is disabled for this token pool then we omit it from the result
-		if !rateLimit.IsEnabled {
-			continue
+	for dstToken := range dstTokens {
+		poolAddress, err := r.config.offRamp.GetPoolByDestToken(&bind.CallOpts{Context: ctx}, dstToken)
+		if err != nil {
+			return nil, fmt.Errorf("get pool by dest token (%s): %w", dstToken, err)
 		}
 
-		tokenAddr, exists := dstPoolToToken[dstPools[i]]
-		if !exists {
-			return nil, fmt.Errorf("pool to token mapping does not contain %s", dstPools[i])
+		tokenPool, err := custom_token_pool.NewCustomTokenPool(poolAddress, r.config.destClient)
+		if err != nil {
+			return nil, fmt.Errorf("new custom dest token pool %s: %w", poolAddress, err)
 		}
-		res[tokenAddr] = rateLimit.Tokens
+
+		rateLimiterState, err := tokenPool.CurrentOffRampRateLimiterState(&bind.CallOpts{Context: ctx}, r.config.offRamp.Address())
+		if err != nil {
+			return nil, fmt.Errorf("get rate off ramp rate limiter state: %w", err)
+		}
+
+		if rateLimiterState.IsEnabled {
+			res[dstToken] = rateLimiterState.Tokens
+		}
 	}
 
 	return res, nil
+}
+
+func (r *ExecutionReportingPlugin) estimateDestinationGasPrice(ctx context.Context) (*big.Int, error) {
+	destGasPriceWei, _, err := r.config.destGasEstimator.GetFee(ctx, nil, 0, assets.NewWei(big.NewInt(int64(r.offchainConfig.MaxGasPrice))))
+	if err != nil {
+		return nil, errors.Wrap(err, "could not estimate destination gas price")
+	}
+	destGasPrice := destGasPriceWei.Legacy.ToInt()
+	if destGasPriceWei.DynamicFeeCap != nil {
+		destGasPrice = destGasPriceWei.DynamicFeeCap.ToInt()
+	}
+	return destGasPrice, nil
 }
 
 func (r *ExecutionReportingPlugin) sourceDestinationTokens(ctx context.Context) (map[common.Address]common.Address, []common.Address, error) {
@@ -435,19 +436,26 @@ func (r *ExecutionReportingPlugin) sourceDestinationTokens(ctx context.Context) 
 // before. It doesn't matter if the executed succeeded, since we don't retry previous
 // attempts even if they failed. Value in the map indicates whether the log is finalized or not.
 func (r *ExecutionReportingPlugin) getExecutedSeqNrsInRange(ctx context.Context, min, max uint64, latestBlock int64) (map[uint64]bool, error) {
-	stateChanges, err := r.config.offRampReader.GetExecutionStateChangesBetweenSeqNums(
-		ctx,
-		min,
-		max,
+	executedLogs, err := r.config.destLP.IndexedLogsTopicRange(
+		abihelpers.EventSignatures.ExecutionStateChanged,
+		r.config.offRamp.Address(),
+		abihelpers.EventSignatures.ExecutionStateChangedSequenceNumberIndex,
+		logpoller.EvmWord(min),
+		logpoller.EvmWord(max),
 		int(r.offchainConfig.DestOptimisticConfirmations),
+		pg.WithParentCtx(ctx),
 	)
 	if err != nil {
 		return nil, err
 	}
-	executedMp := make(map[uint64]bool, len(stateChanges))
-	for _, stateChange := range stateChanges {
-		finalized := (latestBlock - stateChange.BlockNumber) >= int64(r.offchainConfig.DestFinalityDepth)
-		executedMp[stateChange.Data.SequenceNumber] = finalized
+	executedMp := make(map[uint64]bool)
+	for _, executedLog := range executedLogs {
+		exec, err := r.config.offRamp.ParseExecutionStateChanged(executedLog.GetGethLog())
+		if err != nil {
+			return nil, err
+		}
+		finalized := (latestBlock - executedLog.BlockNumber) >= int64(r.offchainConfig.DestFinalityDepth)
+		executedMp[exec.SequenceNumber] = finalized
 	}
 	return executedMp, nil
 }
@@ -456,14 +464,13 @@ func (r *ExecutionReportingPlugin) getExecutedSeqNrsInRange(ctx context.Context,
 // the available gas, rate limiting, execution state, nonce state, and
 // profitability of execution.
 func (r *ExecutionReportingPlugin) buildBatch(
-	ctx context.Context,
 	lggr logger.Logger,
 	report commitReportWithSendRequests,
 	inflight []InflightInternalExecutionReport,
 	aggregateTokenLimit *big.Int,
 	sourceTokenPricesUSD map[common.Address]*big.Int,
 	destTokenPricesUSD map[common.Address]*big.Int,
-	gasPriceEstimate cache.LazyFunction[prices.GasPrice],
+	execGasPriceEstimate LazyFunction[*big.Int],
 	sourceToDestToken map[common.Address]common.Address,
 	destTokenPoolRateLimits map[common.Address]*big.Int,
 ) (executableMessages []ObservedMessage) {
@@ -475,11 +482,10 @@ func (r *ExecutionReportingPlugin) buildBatch(
 	availableGas := uint64(r.offchainConfig.BatchGasLimit)
 	expectedNonces := make(map[common.Address]uint64)
 	availableDataLen := MaxDataLenPerBatch
-	skipTokenWithData := false
 
 	for _, msg := range report.sendRequestsWithMeta {
 		msgLggr := lggr.With("messageID", hexutil.Encode(msg.MessageId[:]))
-		if msg.Executed {
+		if msg.executed && msg.finalized {
 			msgLggr.Infow("Skipping message already executed", "seqNr", msg.SequenceNumber)
 			continue
 		}
@@ -495,9 +501,9 @@ func (r *ExecutionReportingPlugin) buildBatch(
 			} else {
 				// Nothing inflight take from chain.
 				// Chain holds existing nonce.
-				nonce, err := r.config.offRampReader.GetSenderNonce(nil, msg.Sender)
+				nonce, err := r.config.offRamp.GetSenderNonce(nil, msg.Sender)
 				if err != nil {
-					lggr.Errorw("unable to get sender nonce", "err", err, "seqNr", msg.SequenceNumber)
+					lggr.Errorw("unable to get sender nonce", "err", err)
 					continue
 				}
 				expectedNonces[msg.Sender] = nonce + 1
@@ -519,27 +525,13 @@ func (r *ExecutionReportingPlugin) buildBatch(
 			msgLggr.Errorw("Skipping message unable to compute aggregate value", "err", err)
 			continue
 		}
-
 		// if token limit is smaller than message value skip message
 		if tokensLeft, hasCapacity := hasEnoughTokens(aggregateTokenLimit, msgValue, inflightAggregateValue); !hasCapacity {
 			msgLggr.Warnw("token limit is smaller than message value", "aggregateTokenLimit", tokensLeft.String(), "msgValue", msgValue.String())
 			continue
 		}
-
-		tokenData, err2 := getTokenData(ctx, msgLggr, msg, r.config.tokenDataProviders, skipTokenWithData)
-		if err2 != nil {
-			// When fetching token data, 3rd party API could hang or rate limit or fail due to any reason.
-			// If this happens, we skip all remaining msgs that require token data in this batch.
-			// If the issue is transient, then it is likely for other nodes in the DON to succeed and execute the msg anyway.
-			// If the issue is API outage or rate limit, then we should indeed avoid calling the API.
-			// If API issues do not resolve, eventually the root will only contain msg that should be skipped, and be snoozed.
-			skipTokenWithData = true
-			msgLggr.Errorw("Skipping message unable to get token data", "err", err2)
-			continue
-		}
-
 		// Fee boosting
-		gasPriceValue, err := gasPriceEstimate()
+		execGasPriceEstimateValue, err := execGasPriceEstimate()
 		if err != nil {
 			msgLggr.Errorw("Unexpected error fetching gas price estimate", "err", err)
 			return []ObservedMessage{}
@@ -551,12 +543,7 @@ func (r *ExecutionReportingPlugin) buildBatch(
 			continue
 		}
 
-		execCostUsd, err := r.gasPriceEstimator.EstimateMsgCostUSD(gasPriceValue, dstWrappedNativePrice, msg)
-		if err != nil {
-			msgLggr.Errorw("failed to estimate message cost USD", "err", err)
-			return []ObservedMessage{}
-		}
-
+		execCostUsd := computeExecCost(msg.GasLimit, execGasPriceEstimateValue, dstWrappedNativePrice)
 		// calculating the source chain fee, dividing by 1e18 for denomination.
 		// For example:
 		// FeeToken=link; FeeTokenAmount=1e17 i.e. 0.1 link, price is 6e18 USD/link (1 USD = 1e18),
@@ -576,10 +563,10 @@ func (r *ExecutionReportingPlugin) buildBatch(
 
 		availableFee := big.NewInt(0).Mul(msg.FeeTokenAmount, sourceFeeTokenPrice)
 		availableFee = availableFee.Div(availableFee, big.NewInt(1e18))
-		availableFeeUsd := waitBoostedFee(time.Since(msg.BlockTimestamp), availableFee, r.offchainConfig.RelativeBoostPerWaitHour)
+		availableFeeUsd := waitBoostedFee(time.Since(msg.blockTimestamp), availableFee, r.offchainConfig.RelativeBoostPerWaitHour)
 		if availableFeeUsd.Cmp(execCostUsd) < 0 {
 			msgLggr.Infow("Insufficient remaining fee", "availableFeeUsd", availableFeeUsd, "execCostUsd", execCostUsd,
-				"sourceBlockTimestamp", msg.BlockTimestamp, "waitTime", time.Since(msg.BlockTimestamp), "boost", r.offchainConfig.RelativeBoostPerWaitHour)
+				"sourceBlockTimestamp", msg.blockTimestamp, "waitTime", time.Since(msg.blockTimestamp), "boost", r.offchainConfig.RelativeBoostPerWaitHour)
 			continue
 		}
 
@@ -612,6 +599,13 @@ func (r *ExecutionReportingPlugin) buildBatch(
 			}
 		}
 
+		var tokenData [][]byte
+
+		// TODO add attestation data for USDC here
+		for range msg.TokenAmounts {
+			tokenData = append(tokenData, []byte{})
+		}
+
 		msgLggr.Infow("Adding msg to batch", "seqNum", msg.SequenceNumber, "nonce", msg.Nonce,
 			"value", msgValue, "aggregateTokenLimit", aggregateTokenLimit)
 		executableMessages = append(executableMessages, NewObservedMessage(msg.SequenceNumber, tokenData))
@@ -624,33 +618,9 @@ func (r *ExecutionReportingPlugin) buildBatch(
 	return executableMessages
 }
 
-func getTokenData(ctx context.Context, lggr logger.Logger, msg internal.EVM2EVMOnRampCCIPSendRequestedWithMeta, tokenDataProviders map[common.Address]tokendata.Reader, skipTokenWithData bool) (tokenData [][]byte, err error) {
-	for _, token := range msg.TokenAmounts {
-		offchainTokenDataProvider, ok := tokenDataProviders[token.Token]
-		if !ok {
-			// No token data required
-			tokenData = append(tokenData, []byte{})
-			continue
-		}
-		if skipTokenWithData {
-			// If token data is required but should be skipped, exit without calling the API
-			return [][]byte{}, errors.New("token requiring data is flagged to be skipped")
-		}
-		lggr.Infow("Fetching token data", "token", token.Token.Hex())
-		tknData, err2 := offchainTokenDataProvider.ReadTokenData(ctx, msg)
-		if err2 != nil {
-			return [][]byte{}, err2
-		}
-
-		lggr.Infow("Token data retrieved", "token", token.Token.Hex())
-		tokenData = append(tokenData, tknData)
-	}
-	return tokenData, nil
-}
-
 func (r *ExecutionReportingPlugin) isRateLimitEnoughForTokenPool(
 	destTokenPoolRateLimits map[common.Address]*big.Int,
-	sourceTokenAmounts []internal.TokenAmount,
+	sourceTokenAmounts []evm_2_evm_offramp.ClientEVMTokenAmount,
 	inflightTokenAmounts map[common.Address]*big.Int,
 	sourceToDestToken map[common.Address]common.Address,
 ) bool {
@@ -714,8 +684,8 @@ func calculateMessageMaxGas(gasLimit *big.Int, numRequests, dataLen, numTokens i
 
 // helper struct to hold the commitReport and the related send requests
 type commitReportWithSendRequests struct {
-	commitReport         ccipdata.CommitStoreReport
-	sendRequestsWithMeta []internal.EVM2EVMOnRampCCIPSendRequestedWithMeta
+	commitReport         commit_store.CommitStoreCommitReport
+	sendRequestsWithMeta []evm2EVMOnRampCCIPSendRequestedWithMeta
 }
 
 func (r *commitReportWithSendRequests) validate() error {
@@ -730,7 +700,7 @@ func (r *commitReportWithSendRequests) validate() error {
 
 func (r *commitReportWithSendRequests) allRequestsAreExecutedAndFinalized() bool {
 	for _, req := range r.sendRequestsWithMeta {
-		if !req.Executed || !req.Finalized {
+		if !req.executed || !req.finalized {
 			return false
 		}
 	}
@@ -738,7 +708,7 @@ func (r *commitReportWithSendRequests) allRequestsAreExecutedAndFinalized() bool
 }
 
 // checks if the send request fits the commit report interval
-func (r *commitReportWithSendRequests) sendReqFits(sendReq internal.EVM2EVMOnRampCCIPSendRequestedWithMeta) bool {
+func (r *commitReportWithSendRequests) sendReqFits(sendReq evm2EVMOnRampCCIPSendRequestedWithMeta) bool {
 	return sendReq.SequenceNumber >= r.commitReport.Interval.Min &&
 		sendReq.SequenceNumber <= r.commitReport.Interval.Max
 }
@@ -746,7 +716,7 @@ func (r *commitReportWithSendRequests) sendReqFits(sendReq internal.EVM2EVMOnRam
 // getReportsWithSendRequests returns the target reports with populated send requests.
 func (r *ExecutionReportingPlugin) getReportsWithSendRequests(
 	ctx context.Context,
-	reports []ccipdata.CommitStoreReport,
+	reports []commit_store.CommitStoreCommitReport,
 ) ([]commitReportWithSendRequests, error) {
 	if len(reports) == 0 {
 		return nil, nil
@@ -767,28 +737,31 @@ func (r *ExecutionReportingPlugin) getReportsWithSendRequests(
 	// use errgroup to fetch send request logs and executed sequence numbers in parallel
 	eg := &errgroup.Group{}
 
-	var sendRequests []ccipdata.Event[internal.EVM2EVMMessage]
+	var sendRequestLogs []logpoller.Log
 	eg.Go(func() error {
-		sendReqs, err := r.config.onRampReader.GetSendRequestsBetweenSeqNums(
-			ctx,
-			intervalMin,
-			intervalMax,
+		// get logs from all the reports
+		rawLogs, err := r.config.sourceLP.LogsDataWordRange(
+			abihelpers.EventSignatures.SendRequested,
+			r.config.onRamp.Address(),
+			abihelpers.EventSignatures.SendRequestedSequenceNumberWord,
+			logpoller.EvmWord(intervalMin),
+			logpoller.EvmWord(intervalMax),
 			int(r.offchainConfig.SourceFinalityDepth),
+			pg.WithParentCtx(ctx),
 		)
 		if err != nil {
 			return err
 		}
-		sendRequests = sendReqs
+		sendRequestLogs = rawLogs
 		return nil
 	})
 
 	var executedSeqNums map[uint64]bool
 	eg.Go(func() error {
-		latestBlock, err := r.config.destReader.LatestBlock(ctx)
+		latestBlock, err := r.config.destLP.LatestBlock()
 		if err != nil {
 			return err
 		}
-
 		// get executable sequence numbers
 		executedMp, err := r.getExecutedSeqNrsInRange(ctx, intervalMin, intervalMax, latestBlock)
 		if err != nil {
@@ -806,28 +779,36 @@ func (r *ExecutionReportingPlugin) getReportsWithSendRequests(
 	for i, report := range reports {
 		reportsWithSendReqs[i] = commitReportWithSendRequests{
 			commitReport:         report,
-			sendRequestsWithMeta: make([]internal.EVM2EVMOnRampCCIPSendRequestedWithMeta, 0, report.Interval.Max-report.Interval.Min+1),
+			sendRequestsWithMeta: make([]evm2EVMOnRampCCIPSendRequestedWithMeta, 0, report.Interval.Max-report.Interval.Min+1),
 		}
 	}
 
-	for _, sendReq := range sendRequests {
+	for _, rawLog := range sendRequestLogs {
+		ccipSendRequested, err := r.config.onRamp.ParseCCIPSendRequested(gethtypes.Log{
+			Topics: rawLog.GetTopics(),
+			Data:   rawLog.Data,
+		})
+		if err != nil {
+			r.lggr.Errorw("unable to parse message", "err", err, "tx", rawLog.TxHash, "logIdx", rawLog.LogIndex)
+			continue
+		}
+		msg := abihelpers.OnRampMessageToOffRampMessage(ccipSendRequested.Message)
+
 		// if value exists in the map then it's executed
 		// if value exists, and it's true then it's considered finalized
-		finalized, executed := executedSeqNums[sendReq.Data.SequenceNumber]
+		finalized, executed := executedSeqNums[msg.SequenceNumber]
 
-		reqWithMeta := internal.EVM2EVMOnRampCCIPSendRequestedWithMeta{
-			EVM2EVMMessage: sendReq.Data,
-			BlockTimestamp: sendReq.BlockTimestamp,
-			Executed:       executed,
-			Finalized:      finalized,
-			LogIndex:       sendReq.LogIndex,
-			TxHash:         sendReq.TxHash,
+		sendReq := evm2EVMOnRampCCIPSendRequestedWithMeta{
+			InternalEVM2EVMMessage: msg,
+			blockTimestamp:         rawLog.BlockTimestamp,
+			executed:               executed,
+			finalized:              finalized,
 		}
 
 		// attach the msg to the appropriate reports
 		for i := range reportsWithSendReqs {
-			if reportsWithSendReqs[i].sendReqFits(reqWithMeta) {
-				reportsWithSendReqs[i].sendRequestsWithMeta = append(reportsWithSendReqs[i].sendRequestsWithMeta, reqWithMeta)
+			if reportsWithSendReqs[i].sendReqFits(sendReq) {
+				reportsWithSendReqs[i].sendRequestsWithMeta = append(reportsWithSendReqs[i].sendRequestsWithMeta, sendReq)
 			}
 		}
 	}
@@ -835,7 +816,7 @@ func (r *ExecutionReportingPlugin) getReportsWithSendRequests(
 	return reportsWithSendReqs, nil
 }
 
-func aggregateTokenValue(destTokenPricesUSD map[common.Address]*big.Int, sourceToDest map[common.Address]common.Address, tokensAndAmount []internal.TokenAmount) (*big.Int, error) {
+func aggregateTokenValue(destTokenPricesUSD map[common.Address]*big.Int, sourceToDest map[common.Address]common.Address, tokensAndAmount []evm_2_evm_offramp.ClientEVMTokenAmount) (*big.Int, error) {
 	sum := big.NewInt(0)
 	for i := 0; i < len(tokensAndAmount); i++ {
 		price, ok := destTokenPricesUSD[sourceToDest[tokensAndAmount[i].Token]]
@@ -847,33 +828,51 @@ func aggregateTokenValue(destTokenPricesUSD map[common.Address]*big.Int, sourceT
 	return sum, nil
 }
 
+func (r *ExecutionReportingPlugin) parseSeqNr(log logpoller.Log) (uint64, error) {
+	s, err := r.config.onRamp.ParseCCIPSendRequested(log.ToGethLog())
+	if err != nil {
+		return 0, err
+	}
+	return s.Message.SequenceNumber, nil
+}
+
 // Assumes non-empty report. Messages to execute can span more than one report, but are assumed to be in order of increasing
 // sequence number.
 func (r *ExecutionReportingPlugin) buildReport(ctx context.Context, lggr logger.Logger, observedMessages []ObservedMessage) ([]byte, error) {
-	if err := validateSeqNumbers(ctx, r.config.commitStoreReader, observedMessages); err != nil {
+	if err := validateSeqNumbers(ctx, r.config.commitStore, observedMessages); err != nil {
 		return nil, err
 	}
-	commitReport, err := getCommitReportForSeqNum(ctx, r.config.commitStoreReader, observedMessages[0].SeqNr)
+	commitReport, err := getCommitReportForSeqNum(ctx, r.config.destLP, r.config.commitStore, observedMessages[0].SeqNr)
 	if err != nil {
 		return nil, err
 	}
 	lggr.Infow("Building execution report", "observations", observedMessages, "merkleRoot", hexutil.Encode(commitReport.MerkleRoot[:]), "report", commitReport)
 
-	sendReqsInRoot, leaves, tree, err := getProofData(ctx, r.config.onRampReader, commitReport.Interval)
+	msgsInRoot, leaves, tree, err := getProofData(ctx, lggr, r.config.leafHasher, r.parseSeqNr, r.config.onRamp.Address(), r.config.sourceLP, commitReport.Interval)
 	if err != nil {
 		return nil, err
 	}
 
+	messages := make([]*evm_2_evm_offramp.InternalEVM2EVMMessage, len(msgsInRoot))
+	for i, msg := range msgsInRoot {
+		decodedMessage, err2 := abihelpers.DecodeOffRampMessage(msg.Data)
+		if err2 != nil {
+			return nil, err
+		}
+		messages[i] = decodedMessage
+	}
+
 	// cap messages which fits MaxExecutionReportLength (after serialized)
 	capped := sort.Search(len(observedMessages), func(i int) bool {
-		report, err2 := buildExecutionReportForMessages(sendReqsInRoot, leaves, tree, commitReport.Interval, observedMessages[:i+1])
+		report, _, err2 := buildExecutionReportForMessages(messages, leaves, tree, commitReport.Interval, observedMessages[:i+1])
 		if err2 != nil {
-			r.lggr.Errorw("build execution report", "err", err2)
+			r.lggr.Errorw("build execution report", "err", err)
 			return false
 		}
 
-		encoded, err2 := r.config.offRampReader.EncodeExecutionReport(report)
-		if err2 != nil {
+		var encoded []byte
+		encoded, err = abihelpers.EncodeExecutionReport(report)
+		if err != nil {
 			// false makes Search keep looking to the right, always including any "erroring" ObservedMessage and allowing us to detect in the bottom
 			return false
 		}
@@ -883,12 +882,12 @@ func (r *ExecutionReportingPlugin) buildReport(ctx context.Context, lggr logger.
 		return nil, err
 	}
 
-	execReport, err := buildExecutionReportForMessages(sendReqsInRoot, leaves, tree, commitReport.Interval, observedMessages[:capped])
+	execReport, hashes, err := buildExecutionReportForMessages(messages, leaves, tree, commitReport.Interval, observedMessages[:capped])
 	if err != nil {
 		return nil, err
 	}
 
-	encodedReport, err := r.config.offRampReader.EncodeExecutionReport(execReport)
+	encodedReport, err := abihelpers.EncodeExecutionReport(execReport)
 	if err != nil {
 		return nil, err
 	}
@@ -899,12 +898,17 @@ func (r *ExecutionReportingPlugin) buildReport(ctx context.Context, lggr logger.
 			len(observedMessages), capped, len(encodedReport), MaxExecutionReportLength,
 		)
 	}
+
 	// Double check this verifies before sending.
-	valid, err := r.config.commitStoreReader.VerifyExecutionReport(ctx, execReport)
+	res, err := r.config.commitStore.Verify(&bind.CallOpts{Context: ctx}, hashes, execReport.Proofs, execReport.ProofFlagBits)
 	if err != nil {
-		return nil, errors.Wrap(err, "unable to verify")
+		lggr.Errorw("Unable to call verify", "observations", observedMessages[:capped], "root", commitReport.MerkleRoot[:], "seqRange", commitReport.Interval, "err", err)
+		return nil, err
 	}
-	if !valid {
+	// No timestamp, means failed to verify root.
+	if res.Cmp(big.NewInt(0)) == 0 {
+		root := tree.Root()
+		lggr.Errorf("Root does not verify for messages: %v, our inner root 0x%x", observedMessages[:capped], root)
 		return nil, errors.New("root does not verify")
 	}
 	return encodedReport, nil
@@ -949,7 +953,7 @@ func calculateObservedMessagesConsensus(observations []ExecutionObservation, f i
 	tally := make(map[tallyKey]tallyVal)
 	for _, obs := range observations {
 		for seqNr, msgData := range obs.Messages {
-			tokenDataHash, err := hashlib.BytesOfBytesKeccak(msgData.TokenData)
+			tokenDataHash, err := bytesOfBytesKeccak(msgData.TokenData)
 			if err != nil {
 				return nil, fmt.Errorf("bytes of bytes keccak: %w", err)
 			}
@@ -997,15 +1001,15 @@ func calculateObservedMessagesConsensus(observations []ExecutionObservation, f i
 
 func (r *ExecutionReportingPlugin) ShouldAcceptFinalizedReport(ctx context.Context, timestamp types.ReportTimestamp, report types.Report) (bool, error) {
 	lggr := r.lggr.Named("ShouldAcceptFinalizedReport")
-	execReport, err := r.config.offRampReader.DecodeExecutionReport(report)
+	messages, err := abihelpers.MessagesFromExecutionReport(report)
 	if err != nil {
 		lggr.Errorw("Unable to decode report", "err", err)
 		return false, err
 	}
-	lggr = lggr.With("messageIDs", contractutil.GetMessageIDsAsHexString(execReport.Messages))
+	lggr = lggr.With("messageIDs", getMessageIDsAsHexString(messages))
 
 	// If the first message is executed already, this execution report is stale, and we do not accept it.
-	stale, err := r.isStaleReport(execReport.Messages)
+	stale, err := r.isStaleReport(messages)
 	if err != nil {
 		return false, err
 	}
@@ -1014,7 +1018,7 @@ func (r *ExecutionReportingPlugin) ShouldAcceptFinalizedReport(ctx context.Conte
 		return false, nil
 	}
 	// Else just assume in flight
-	if err = r.inflightReports.add(lggr, execReport.Messages); err != nil {
+	if err = r.inflightReports.add(lggr, messages); err != nil {
 		return false, err
 	}
 	lggr.Info("Accepting finalized report")
@@ -1023,17 +1027,17 @@ func (r *ExecutionReportingPlugin) ShouldAcceptFinalizedReport(ctx context.Conte
 
 func (r *ExecutionReportingPlugin) ShouldTransmitAcceptedReport(ctx context.Context, timestamp types.ReportTimestamp, report types.Report) (bool, error) {
 	lggr := r.lggr.Named("ShouldTransmitAcceptedReport")
-	execReport, err := r.config.offRampReader.DecodeExecutionReport(report)
+	messages, err := abihelpers.MessagesFromExecutionReport(report)
 	if err != nil {
 		lggr.Errorw("Unable to decode report", "err", err)
 		return false, nil
 	}
-	lggr = lggr.With("messageIDs", contractutil.GetMessageIDsAsHexString(execReport.Messages))
+	lggr = lggr.With("messageIDs", getMessageIDsAsHexString(messages))
 
 	// If report is not stale we transmit.
 	// When the executeTransmitter enqueues the tx for tx manager,
 	// we mark it as execution_sent, removing it from the set of inflight messages.
-	stale, err := r.isStaleReport(execReport.Messages)
+	stale, err := r.isStaleReport(messages)
 	if err != nil {
 		return false, err
 	}
@@ -1046,7 +1050,7 @@ func (r *ExecutionReportingPlugin) ShouldTransmitAcceptedReport(ctx context.Cont
 	return true, err
 }
 
-func (r *ExecutionReportingPlugin) isStaleReport(messages []internal.EVM2EVMMessage) (bool, error) {
+func (r *ExecutionReportingPlugin) isStaleReport(messages []evm_2_evm_offramp.InternalEVM2EVMMessage) (bool, error) {
 	if len(messages) == 0 {
 		return true, fmt.Errorf("messages are empty")
 	}
@@ -1054,11 +1058,11 @@ func (r *ExecutionReportingPlugin) isStaleReport(messages []internal.EVM2EVMMess
 	// If the first message is executed already, this execution report is stale.
 	// Note the default execution state, including for arbitrary seq number not yet committed
 	// is ExecutionStateUntouched.
-	msgState, err := r.config.offRampReader.GetExecutionState(nil, messages[0].SequenceNumber)
+	msgState, err := r.config.offRamp.GetExecutionState(nil, messages[0].SequenceNumber)
 	if err != nil {
 		return true, err
 	}
-	if state := ccipdata.MessageExecutionState(msgState); state == ccipdata.ExecutionStateFailure || state == ccipdata.ExecutionStateSuccess {
+	if state := abihelpers.MessageExecutionState(msgState); state == abihelpers.ExecutionStateFailure || state == abihelpers.ExecutionStateSuccess {
 		return true, nil
 	}
 
@@ -1108,12 +1112,12 @@ func inflightAggregates(
 // results include feeTokens and passed-in tokens
 // price values are USD per 1e18 of smallest token denomination, in base units 1e18 (e.g. 5$ = 5e18 USD per 1e18 units).
 // this function is used for price registry of both source and destination chains.
-func getTokensPrices(ctx context.Context, feeTokens []common.Address, priceRegistry ccipdata.PriceRegistryReader, tokens []common.Address) (map[common.Address]*big.Int, error) {
+func getTokensPrices(ctx context.Context, feeTokens []common.Address, priceRegistry price_registry.PriceRegistryInterface, tokens []common.Address) (map[common.Address]*big.Int, error) {
 	priceRegistryAddress := priceRegistry.Address()
 	prices := make(map[common.Address]*big.Int)
 
 	wantedTokens := append(feeTokens, tokens...)
-	fetchedPrices, err := priceRegistry.GetTokenPrices(ctx, wantedTokens)
+	fetchedPrices, err := priceRegistry.GetTokenPrices(&bind.CallOpts{Context: ctx}, wantedTokens)
 	if err != nil {
 		return nil, errors.Wrapf(err, "could not get token prices of %v", wantedTokens)
 	}
@@ -1144,21 +1148,30 @@ func getTokensPrices(ctx context.Context, feeTokens []common.Address, priceRegis
 
 func getUnexpiredCommitReports(
 	ctx context.Context,
-	commitStoreReader ccipdata.CommitStoreReader,
+	dstLogPoller logpoller.LogPoller,
+	commitStore commit_store.CommitStoreInterface,
 	permissionExecutionThreshold time.Duration,
-) ([]ccipdata.CommitStoreReport, error) {
-	acceptedReports, err := commitStoreReader.GetAcceptedCommitReportsGteTimestamp(
-		ctx,
+) ([]commit_store.CommitStoreCommitReport, error) {
+	logs, err := dstLogPoller.LogsCreatedAfter(
+		abihelpers.EventSignatures.ReportAccepted,
+		commitStore.Address(),
 		time.Now().Add(-permissionExecutionThreshold),
 		0,
+		pg.WithParentCtx(ctx),
 	)
 	if err != nil {
 		return nil, err
 	}
-
-	var reports []ccipdata.CommitStoreReport
-	for _, acceptedReport := range acceptedReports {
-		reports = append(reports, acceptedReport.Data)
+	var reports []commit_store.CommitStoreCommitReport
+	for _, log := range logs {
+		reportAccepted, err := commitStore.ParseReportAccepted(gethtypes.Log{
+			Topics: log.GetTopics(),
+			Data:   log.Data,
+		})
+		if err != nil {
+			return nil, err
+		}
+		reports = append(reports, reportAccepted.Report)
 	}
 	return reports, nil
 }

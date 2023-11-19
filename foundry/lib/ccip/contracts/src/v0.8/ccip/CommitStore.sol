@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.19;
 
-import {ITypeAndVersion} from "../shared/interfaces/ITypeAndVersion.sol";
+import {TypeAndVersionInterface} from "../interfaces/TypeAndVersionInterface.sol";
 import {ICommitStore} from "./interfaces/ICommitStore.sol";
 import {IARM} from "./interfaces/IARM.sol";
 import {IPriceRegistry} from "./interfaces/IPriceRegistry.sol";
@@ -10,7 +10,7 @@ import {OCR2Base} from "./ocr/OCR2Base.sol";
 import {Internal} from "./libraries/Internal.sol";
 import {MerkleMultiProof} from "./libraries/MerkleMultiProof.sol";
 
-contract CommitStore is ICommitStore, ITypeAndVersion, OCR2Base {
+contract CommitStore is ICommitStore, TypeAndVersionInterface, OCR2Base {
   error StaleReport();
   error PausedError();
   error InvalidInterval(Interval interval);
@@ -21,16 +21,14 @@ contract CommitStore is ICommitStore, ITypeAndVersion, OCR2Base {
 
   event Paused(address account);
   event Unpaused(address account);
-  /// @dev RMN depends on this event, if changing, please notify the RMN maintainers.
   event ReportAccepted(CommitReport report);
   event ConfigSet(StaticConfig staticConfig, DynamicConfig dynamicConfig);
   event RootRemoved(bytes32 root);
 
   /// @notice Static commit store config
-  /// @dev RMN depends on this struct, if changing, please notify the RMN maintainers.
   struct StaticConfig {
-    uint64 chainSelector; // ───────╮  Destination chainSelector
-    uint64 sourceChainSelector; // ─╯  Source chainSelector
+    uint64 chainSelector; // -------┐  Destination chainSelector
+    uint64 sourceChainSelector; // -┘  Source chainSelector
     address onRamp; // OnRamp address on the source chain
     address armProxy; // ARM proxy address
   }
@@ -41,14 +39,12 @@ contract CommitStore is ICommitStore, ITypeAndVersion, OCR2Base {
   }
 
   /// @notice a sequenceNumber interval
-  /// @dev RMN depends on this struct, if changing, please notify the RMN maintainers.
   struct Interval {
-    uint64 min; // ───╮ Minimum sequence number, inclusive
-    uint64 max; // ───╯ Maximum sequence number, inclusive
+    uint64 min; // ---┐ Minimum sequence number, inclusive
+    uint64 max; // ---┘ Maximum sequence number, inclusive
   }
 
   /// @notice Report that is committed by the observing DON at the committing phase
-  /// @dev RMN depends on this struct, if changing, please notify the RMN maintainers.
   struct CommitReport {
     Internal.PriceUpdates priceUpdates;
     Interval interval;
@@ -57,7 +53,7 @@ contract CommitStore is ICommitStore, ITypeAndVersion, OCR2Base {
 
   // STATIC CONFIG
   // solhint-disable-next-line chainlink-solidity/all-caps-constant-storage-variables
-  string public constant override typeAndVersion = "CommitStore 1.2.0";
+  string public constant override typeAndVersion = "CommitStore 1.0.0";
   // Chain ID of this chain
   uint64 internal immutable i_chainSelector;
   // Chain ID of the source chain
@@ -102,7 +98,7 @@ contract CommitStore is ICommitStore, ITypeAndVersion, OCR2Base {
   }
 
   // ================================================================
-  // │                        Verification                          │
+  // |                        Verification                          |
   // ================================================================
 
   /// @notice Returns the next expected sequence number.
@@ -174,7 +170,7 @@ contract CommitStore is ICommitStore, ITypeAndVersion, OCR2Base {
   }
 
   /// @inheritdoc OCR2Base
-  /// @dev A commitReport can have two distinct parts (batched together to amortize the cost of checking sigs):
+  /// @dev A commitReport can have two distinct parts:
   /// 1. Price updates
   /// 2. A merkle root and sequence number interval
   /// Both have their own, separate, staleness checks, with price updates using the epoch and round
@@ -188,7 +184,7 @@ contract CommitStore is ICommitStore, ITypeAndVersion, OCR2Base {
     CommitReport memory report = abi.decode(encodedReport, (CommitReport));
 
     // Check if the report contains price updates
-    if (report.priceUpdates.tokenPriceUpdates.length > 0 || report.priceUpdates.gasPriceUpdates.length > 0) {
+    if (report.priceUpdates.tokenPriceUpdates.length > 0 || report.priceUpdates.destChainSelector != 0) {
       // Check for price staleness based on the epoch and round
       if (s_latestPriceEpochAndRound < epochAndRound) {
         // If prices are not stale, update the latest epoch and round
@@ -222,11 +218,10 @@ contract CommitStore is ICommitStore, ITypeAndVersion, OCR2Base {
   }
 
   // ================================================================
-  // │                           Config                             │
+  // |                           Config                             |
   // ================================================================
 
   /// @notice Returns the static commit store config.
-  /// @dev RMN depends on this function, if changing, please notify the RMN maintainers.
   /// @return the configuration.
   function getStaticConfig() external view returns (StaticConfig memory) {
     return
@@ -269,7 +264,7 @@ contract CommitStore is ICommitStore, ITypeAndVersion, OCR2Base {
   }
 
   // ================================================================
-  // │                        Access and ARM                        │
+  // |                        Access and ARM                        |
   // ================================================================
 
   /// @notice Single function to check the status of the commitStore.

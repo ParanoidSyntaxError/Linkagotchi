@@ -338,11 +338,7 @@ func setupKeystore(cli *Shell, app chainlink.Application, keyStore keystore.Mast
 	}
 
 	if cli.Config.EVMEnabled() {
-		chains, err := app.GetRelayers().LegacyEVMChains().List()
-		if err != nil {
-			return fmt.Errorf("failed to get legacy evm chains")
-		}
-		for _, ch := range chains {
+		for _, ch := range app.GetChains().EVM.Chains() {
 			if err = keyStore.Eth().EnsureKeys(ch.ID()); err != nil {
 				return errors.Wrap(err, "failed to ensure keystore keys")
 			}

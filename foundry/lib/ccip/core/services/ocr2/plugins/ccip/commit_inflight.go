@@ -7,8 +7,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/commit_store"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ccip/internal/ccipdata"
 )
 
 const (
@@ -26,13 +26,12 @@ const (
 // we are able to obtain high throughput during happy path yet still naturally recover
 // if a reorg or issue causes onchain reverts.
 type InflightCommitReport struct {
-	report    ccipdata.CommitStoreReport
+	report    commit_store.CommitStoreCommitReport
 	createdAt time.Time
 }
 
 type InflightPriceUpdate struct {
-	gasPrices     []ccipdata.GasPrice
-	tokenPrices   []ccipdata.TokenPrice
+	priceUpdates  commit_store.InternalPriceUpdates
 	createdAt     time.Time
 	epochAndRound uint64
 }
@@ -68,27 +67,28 @@ func (c *inflightCommitReportsContainer) maxInflightSeqNr() uint64 {
 	return max
 }
 
-// latestInflightGasPriceUpdates returns a map of the latest gas price updates.
-func (c *inflightCommitReportsContainer) latestInflightGasPriceUpdates() map[uint64]update {
+// latestGasPriceUpdate return the latest inflight gas price update or nil if there is no inflight gas price update.
+func (c *inflightCommitReportsContainer) getLatestInflightGasPriceUpdate() *update {
 	c.locker.RLock()
 	defer c.locker.RUnlock()
-	latestGasPriceUpdates := make(map[uint64]update)
-	latestEpochAndRounds := make(map[uint64]uint64)
-
+	var latestGasPriceUpdate *update
+	var latestEpochAndRound uint64
 	for _, inflight := range c.inFlightPriceUpdates {
-		for _, inflightGasUpdate := range inflight.gasPrices {
-			_, ok := latestGasPriceUpdates[inflightGasUpdate.DestChainSelector]
-			if !ok || inflight.epochAndRound > latestEpochAndRounds[inflightGasUpdate.DestChainSelector] {
-				latestGasPriceUpdates[inflightGasUpdate.DestChainSelector] = update{
-					value:     inflightGasUpdate.Value,
-					timestamp: inflight.createdAt,
-				}
-				latestEpochAndRounds[inflightGasUpdate.DestChainSelector] = inflight.epochAndRound
+		if inflight.priceUpdates.DestChainSelector == 0 {
+			// Price updates did not include a gas price
+			continue
+		}
+		if latestGasPriceUpdate == nil || inflight.epochAndRound > latestEpochAndRound {
+			// First price found or found later update, set it
+			latestGasPriceUpdate = &update{
+				timestamp: inflight.createdAt,
+				value:     inflight.priceUpdates.UsdPerUnitGas,
 			}
+			latestEpochAndRound = inflight.epochAndRound
+			continue
 		}
 	}
-
-	return latestGasPriceUpdates
+	return latestGasPriceUpdate
 }
 
 // latestInflightTokenPriceUpdates returns a map of the latest token price updates
@@ -98,14 +98,20 @@ func (c *inflightCommitReportsContainer) latestInflightTokenPriceUpdates() map[c
 	latestTokenPriceUpdates := make(map[common.Address]update)
 	latestEpochAndRounds := make(map[common.Address]uint64)
 	for _, inflight := range c.inFlightPriceUpdates {
-		for _, inflightTokenUpdate := range inflight.tokenPrices {
-			_, ok := latestTokenPriceUpdates[inflightTokenUpdate.Token]
-			if !ok || inflight.epochAndRound > latestEpochAndRounds[inflightTokenUpdate.Token] {
-				latestTokenPriceUpdates[inflightTokenUpdate.Token] = update{
-					value:     inflightTokenUpdate.Value,
+		for _, inflightTokenUpdate := range inflight.priceUpdates.TokenPriceUpdates {
+			if _, ok := latestTokenPriceUpdates[inflightTokenUpdate.SourceToken]; !ok {
+				latestTokenPriceUpdates[inflightTokenUpdate.SourceToken] = update{
+					value:     inflightTokenUpdate.UsdPerToken,
 					timestamp: inflight.createdAt,
 				}
-				latestEpochAndRounds[inflightTokenUpdate.Token] = inflight.epochAndRound
+				latestEpochAndRounds[inflightTokenUpdate.SourceToken] = inflight.epochAndRound
+			}
+			if inflight.epochAndRound > latestEpochAndRounds[inflightTokenUpdate.SourceToken] {
+				latestTokenPriceUpdates[inflightTokenUpdate.SourceToken] = update{
+					value:     inflightTokenUpdate.UsdPerToken,
+					timestamp: inflight.createdAt,
+				}
+				latestEpochAndRounds[inflightTokenUpdate.SourceToken] = inflight.epochAndRound
 			}
 		}
 	}
@@ -142,7 +148,7 @@ func (c *inflightCommitReportsContainer) expire(lggr logger.Logger) {
 		if timeSinceUpdate > c.cacheExpiry*PRICE_EXPIRY_MULTIPLIER {
 			// Happy path: inflight report was successfully transmitted onchain, we remove it from inflight and onchain state reflects inflight.
 			// Sad path: inflight report reverts onchain, we remove it from inflight, onchain state does not reflect the chains, so we retry.
-			lggr.Infow("Inflight price update expired", "gasPrices", inFlightFeeUpdate.gasPrices, "tokenPrices", inFlightFeeUpdate.tokenPrices)
+			lggr.Infow("Inflight price update expired", "updates", inFlightFeeUpdate.priceUpdates)
 		} else {
 			// If the update is still valid, we keep it in the inflight list.
 			stillInflight = append(stillInflight, inFlightFeeUpdate)
@@ -151,7 +157,7 @@ func (c *inflightCommitReportsContainer) expire(lggr logger.Logger) {
 	c.inFlightPriceUpdates = stillInflight
 }
 
-func (c *inflightCommitReportsContainer) add(lggr logger.Logger, report ccipdata.CommitStoreReport, epochAndRound uint64) error {
+func (c *inflightCommitReportsContainer) add(lggr logger.Logger, report commit_store.CommitStoreCommitReport, epochAndRound uint64) error {
 	c.locker.Lock()
 	defer c.locker.Unlock()
 
@@ -164,11 +170,10 @@ func (c *inflightCommitReportsContainer) add(lggr logger.Logger, report ccipdata
 		}
 	}
 
-	if len(report.GasPrices) != 0 || len(report.TokenPrices) != 0 {
-		lggr.Infow("Adding to inflight fee updates", "gasPrices", report.GasPrices, "tokenPrices", report.TokenPrices)
+	if report.PriceUpdates.DestChainSelector != 0 || len(report.PriceUpdates.TokenPriceUpdates) != 0 {
+		lggr.Infow("Adding to inflight fee updates", "priceUpdates", report.PriceUpdates)
 		c.inFlightPriceUpdates = append(c.inFlightPriceUpdates, InflightPriceUpdate{
-			gasPrices:     report.GasPrices,
-			tokenPrices:   report.TokenPrices,
+			priceUpdates:  report.PriceUpdates,
 			createdAt:     time.Now(),
 			epochAndRound: epochAndRound,
 		})

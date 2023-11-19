@@ -7,8 +7,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/lib/pq"
 
-	"github.com/smartcontractkit/chainlink-relay/pkg/types"
-
 	"github.com/smartcontractkit/chainlink/integration-tests/client"
 
 	"github.com/smartcontractkit/chainlink/v2/core/services/job"
@@ -38,6 +36,7 @@ type CCIPJobSpecParams struct {
 	CommitStore            common.Address
 	SourceChainName        string
 	DestChainName          string
+	SourceEvmChainId       uint64
 	DestEvmChainId         uint64
 	TokenPricesUSDPipeline string
 	SourceStartBlock       uint64
@@ -83,13 +82,14 @@ func (params CCIPJobSpecParams) CommitJobSpec() (*client.OCR2TaskJobSpec, error)
 	}
 	ocrSpec := job.OCR2OracleSpec{
 		Relay:                             relay.EVM,
-		PluginType:                        types.CCIPCommit,
+		PluginType:                        job.CCIPCommit,
 		ContractID:                        params.CommitStore.Hex(),
 		ContractConfigConfirmations:       1,
 		ContractConfigTrackerPollInterval: models.Interval(20 * time.Second),
 		P2PV2Bootstrappers:                params.P2PV2Bootstrappers,
 		PluginConfig: map[string]interface{}{
-			"offRamp": fmt.Sprintf(`"%s"`, params.OffRamp.Hex()),
+			"sourceEvmChainId": params.SourceEvmChainId,
+			"offRamp":          fmt.Sprintf(`"%s"`, params.OffRamp.Hex()),
 			"tokenPricesUSDPipeline": fmt.Sprintf(`"""
 %s
 """`, params.TokenPricesUSDPipeline),
@@ -120,13 +120,15 @@ func (params CCIPJobSpecParams) ExecutionJobSpec() (*client.OCR2TaskJobSpec, err
 	}
 	ocrSpec := job.OCR2OracleSpec{
 		Relay:                             relay.EVM,
-		PluginType:                        types.CCIPExecution,
+		PluginType:                        job.CCIPExecution,
 		ContractID:                        params.OffRamp.Hex(),
 		ContractConfigConfirmations:       1,
 		ContractConfigTrackerPollInterval: models.Interval(20 * time.Second),
 
 		P2PV2Bootstrappers: params.P2PV2Bootstrappers,
-		PluginConfig:       map[string]interface{}{},
+		PluginConfig: map[string]interface{}{
+			"sourceEvmChainId": params.SourceEvmChainId,
+		},
 		RelayConfig: map[string]interface{}{
 			"chainID": params.DestEvmChainId,
 		},
@@ -166,6 +168,7 @@ func (c *CCIPIntegrationTestHarness) NewCCIPJobSpecParams(tokenPricesUSDPipeline
 		CommitStore:            c.Dest.CommitStore.Address(),
 		OffRamp:                c.Dest.OffRamp.Address(),
 		DestEvmChainId:         c.Dest.ChainID,
+		SourceEvmChainId:       c.Source.ChainID,
 		SourceChainName:        "SimulatedSource",
 		DestChainName:          "SimulatedDest",
 		TokenPricesUSDPipeline: tokenPricesUSDPipeline,

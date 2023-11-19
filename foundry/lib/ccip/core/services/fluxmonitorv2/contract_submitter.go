@@ -7,6 +7,7 @@ import (
 
 	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
 	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/flux_aggregator_wrapper"
+	"github.com/smartcontractkit/chainlink/v2/core/services/pg"
 )
 
 //go:generate mockery --quiet --name ContractSubmitter --output ./mocks/ --case=underscore
@@ -16,7 +17,7 @@ var FluxAggregatorABI = evmtypes.MustGetABI(flux_aggregator_wrapper.FluxAggregat
 
 // ContractSubmitter defines an interface to submit an eth tx.
 type ContractSubmitter interface {
-	Submit(roundID *big.Int, submission *big.Int, idempotencyKey *string) error
+	Submit(roundID *big.Int, submission *big.Int, qopts ...pg.QOpt) error
 }
 
 // FluxAggregatorContractSubmitter submits the polled answer in an eth tx.
@@ -50,7 +51,7 @@ func NewFluxAggregatorContractSubmitter(
 
 // Submit submits the answer by writing a EthTx for the txmgr to
 // pick up
-func (c *FluxAggregatorContractSubmitter) Submit(roundID *big.Int, submission *big.Int, idempotencyKey *string) error {
+func (c *FluxAggregatorContractSubmitter) Submit(roundID *big.Int, submission *big.Int, qopts ...pg.QOpt) error {
 	fromAddress, err := c.keyStore.GetRoundRobinAddress(c.chainID)
 	if err != nil {
 		return err
@@ -62,7 +63,7 @@ func (c *FluxAggregatorContractSubmitter) Submit(roundID *big.Int, submission *b
 	}
 
 	return errors.Wrap(
-		c.orm.CreateEthTransaction(fromAddress, c.Address(), payload, c.gasLimit, idempotencyKey),
+		c.orm.CreateEthTransaction(fromAddress, c.Address(), payload, c.gasLimit, qopts...),
 		"failed to send Eth transaction",
 	)
 }

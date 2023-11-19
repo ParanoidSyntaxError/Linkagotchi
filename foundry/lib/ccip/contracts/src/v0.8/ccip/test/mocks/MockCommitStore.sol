@@ -2,6 +2,7 @@
 pragma solidity 0.8.19;
 
 import {ICommitStore} from "../../interfaces/ICommitStore.sol";
+import {Pausable} from "../../../vendor/Pausable.sol";
 
 contract MockCommitStore is ICommitStore {
   error PausedError();

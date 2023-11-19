@@ -1,20 +1,19 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.19;
 
-import {ITypeAndVersion} from "../shared/interfaces/ITypeAndVersion.sol";
 import {IPriceRegistry} from "./interfaces/IPriceRegistry.sol";
 
 import {OwnerIsCreator} from "./../shared/access/OwnerIsCreator.sol";
 import {Internal} from "./libraries/Internal.sol";
 import {USDPriceWith18Decimals} from "./libraries/USDPriceWith18Decimals.sol";
 
-import {EnumerableSet} from "../vendor/openzeppelin-solidity/v4.8.0/contracts/utils/structs/EnumerableSet.sol";
+import {EnumerableSet} from "../vendor/openzeppelin-solidity/v4.8.0/utils/structs/EnumerableSet.sol";
 
 /// @notice The PriceRegistry contract responsibility is to store the current gas price in USD for a given destination chain,
 /// and the price of a token in USD allowing the owner or priceUpdater to update this value.
-contract PriceRegistry is IPriceRegistry, OwnerIsCreator, ITypeAndVersion {
+contract PriceRegistry is IPriceRegistry, OwnerIsCreator {
   using EnumerableSet for EnumerableSet.AddressSet;
-  using USDPriceWith18Decimals for uint224;
+  using USDPriceWith18Decimals for uint192;
 
   error TokenNotSupported(address token);
   error ChainNotSupported(uint64 chain);
@@ -30,18 +29,12 @@ contract PriceRegistry is IPriceRegistry, OwnerIsCreator, ITypeAndVersion {
   event UsdPerUnitGasUpdated(uint64 indexed destChain, uint256 value, uint256 timestamp);
   event UsdPerTokenUpdated(address indexed token, uint256 value, uint256 timestamp);
 
-  // solhint-disable-next-line chainlink-solidity/all-caps-constant-storage-variables
-  string public constant override typeAndVersion = "PriceRegistry 1.2.0";
-
-  /// @dev The gas price per unit of gas for a given destination chain, in USD with 18 decimals.
-  /// Multiple gas prices can be encoded into the same value. Each price takes {Internal.GAS_PRICE_BITS} bits.
-  /// For example, if Optimism is the destination chain, gas price can include L1 base fee and L2 gas price.
-  /// Logic to parse the price components is chain-specific, and should live in OnRamp.
+  /// @dev The price, in USD with 18 decimals, of 1 unit of gas for a given destination chain.
   /// @dev Price of 1e18 is 1 USD. Examples:
   ///     Very Expensive:   1 unit of gas costs 1 USD                  -> 1e18
   ///     Expensive:        1 unit of gas costs 0.1 USD                -> 1e17
   ///     Cheap:            1 unit of gas costs 0.000001 USD           -> 1e12
-  mapping(uint64 destChainSelector => Internal.TimestampedPackedUint224 price)
+  mapping(uint64 destChainSelector => Internal.TimestampedUint192Value price)
     private s_usdPerUnitGasByDestChainSelector;
 
   /// @dev The price, in USD with 18 decimals, per 1e18 of the smallest token denomination.
@@ -49,7 +42,7 @@ contract PriceRegistry is IPriceRegistry, OwnerIsCreator, ITypeAndVersion {
   ///     1 USDC = 1.00 USD per full token, each full token is 1e6 units -> 1 * 1e18 * 1e18 / 1e6 = 1e30
   ///     1 ETH = 2,000 USD per full token, each full token is 1e18 units -> 2000 * 1e18 * 1e18 / 1e18 = 2_000e18
   ///     1 LINK = 5.00 USD per full token, each full token is 1e18 units -> 5 * 1e18 * 1e18 / 1e18 = 5e18
-  mapping(address token => Internal.TimestampedPackedUint224 price) private s_usdPerToken;
+  mapping(address token => Internal.TimestampedUint192Value price) private s_usdPerToken;
 
   // Price updaters are allowed to update the prices.
   EnumerableSet.AddressSet private s_priceUpdaters;
@@ -66,25 +59,25 @@ contract PriceRegistry is IPriceRegistry, OwnerIsCreator, ITypeAndVersion {
   }
 
   // ================================================================
-  // │                     Price calculations                       │
+  // |                     Price calculations                       |
   // ================================================================
 
   // @inheritdoc IPriceRegistry
-  function getTokenPrice(address token) public view override returns (Internal.TimestampedPackedUint224 memory) {
+  function getTokenPrice(address token) public view override returns (Internal.TimestampedUint192Value memory) {
     return s_usdPerToken[token];
   }
 
   // @inheritdoc IPriceRegistry
-  function getValidatedTokenPrice(address token) external view override returns (uint224) {
+  function getValidatedTokenPrice(address token) external view override returns (uint192) {
     return _getValidatedTokenPrice(token);
   }
 
   // @inheritdoc IPriceRegistry
   function getTokenPrices(
     address[] calldata tokens
-  ) external view override returns (Internal.TimestampedPackedUint224[] memory) {
+  ) external view override returns (Internal.TimestampedUint192Value[] memory) {
     uint256 length = tokens.length;
-    Internal.TimestampedPackedUint224[] memory tokenPrices = new Internal.TimestampedPackedUint224[](length);
+    Internal.TimestampedUint192Value[] memory tokenPrices = new Internal.TimestampedUint192Value[](length);
     for (uint256 i = 0; i < length; ++i) {
       tokenPrices[i] = getTokenPrice(tokens[i]);
     }
@@ -100,15 +93,15 @@ contract PriceRegistry is IPriceRegistry, OwnerIsCreator, ITypeAndVersion {
   // @inheritdoc IPriceRegistry
   function getDestinationChainGasPrice(
     uint64 destChainSelector
-  ) external view override returns (Internal.TimestampedPackedUint224 memory) {
+  ) external view override returns (Internal.TimestampedUint192Value memory) {
     return s_usdPerUnitGasByDestChainSelector[destChainSelector];
   }
 
   function getTokenAndGasPrices(
     address token,
     uint64 destChainSelector
-  ) external view override returns (uint224 tokenPrice, uint224 gasPriceValue) {
-    Internal.TimestampedPackedUint224 memory gasPrice = s_usdPerUnitGasByDestChainSelector[destChainSelector];
+  ) external view override returns (uint192 tokenPrice, uint192 gasPriceValue) {
+    Internal.TimestampedUint192Value memory gasPrice = s_usdPerUnitGasByDestChainSelector[destChainSelector];
     // We do allow a gas price of 0, but no stale or unset gas prices
     if (gasPrice.timestamp == 0) revert ChainNotSupported(destChainSelector);
     uint256 timePassed = block.timestamp - gasPrice.timestamp;
@@ -138,8 +131,8 @@ contract PriceRegistry is IPriceRegistry, OwnerIsCreator, ITypeAndVersion {
   /// not supported or the price is stale.
   /// @param token The address of the token to get the price for
   /// @return the token price
-  function _getValidatedTokenPrice(address token) internal view returns (uint224) {
-    Internal.TimestampedPackedUint224 memory tokenPrice = s_usdPerToken[token];
+  function _getValidatedTokenPrice(address token) internal view returns (uint192) {
+    Internal.TimestampedUint192Value memory tokenPrice = s_usdPerToken[token];
     if (tokenPrice.timestamp == 0 || tokenPrice.value == 0) revert TokenNotSupported(token);
     uint256 timePassed = block.timestamp - tokenPrice.timestamp;
     if (timePassed > i_stalenessThreshold) revert StaleTokenPrice(token, i_stalenessThreshold, timePassed);
@@ -147,7 +140,7 @@ contract PriceRegistry is IPriceRegistry, OwnerIsCreator, ITypeAndVersion {
   }
 
   // ================================================================
-  // │                         Fee tokens                           │
+  // |                         Fee tokens                           |
   // ================================================================
 
   /// @notice Get the list of fee tokens.
@@ -185,36 +178,33 @@ contract PriceRegistry is IPriceRegistry, OwnerIsCreator, ITypeAndVersion {
   }
 
   // ================================================================
-  // │                       Price updates                          │
+  // |                       Price updates                          |
   // ================================================================
 
   // @inheritdoc IPriceRegistry
   function updatePrices(Internal.PriceUpdates calldata priceUpdates) external override requireUpdaterOrOwner {
-    uint256 tokenUpdatesLength = priceUpdates.tokenPriceUpdates.length;
+    uint256 priceUpdatesLength = priceUpdates.tokenPriceUpdates.length;
 
-    for (uint256 i = 0; i < tokenUpdatesLength; ++i) {
+    for (uint256 i = 0; i < priceUpdatesLength; ++i) {
       Internal.TokenPriceUpdate memory update = priceUpdates.tokenPriceUpdates[i];
-      s_usdPerToken[update.sourceToken] = Internal.TimestampedPackedUint224({
+      s_usdPerToken[update.sourceToken] = Internal.TimestampedUint192Value({
         value: update.usdPerToken,
-        timestamp: uint32(block.timestamp)
+        timestamp: uint64(block.timestamp)
       });
       emit UsdPerTokenUpdated(update.sourceToken, update.usdPerToken, block.timestamp);
     }
 
-    uint256 gasUpdatesLength = priceUpdates.gasPriceUpdates.length;
-
-    for (uint256 i = 0; i < gasUpdatesLength; ++i) {
-      Internal.GasPriceUpdate memory update = priceUpdates.gasPriceUpdates[i];
-      s_usdPerUnitGasByDestChainSelector[update.destChainSelector] = Internal.TimestampedPackedUint224({
-        value: update.usdPerUnitGas,
-        timestamp: uint32(block.timestamp)
+    if (priceUpdates.destChainSelector != 0) {
+      s_usdPerUnitGasByDestChainSelector[priceUpdates.destChainSelector] = Internal.TimestampedUint192Value({
+        value: priceUpdates.usdPerUnitGas,
+        timestamp: uint64(block.timestamp)
       });
-      emit UsdPerUnitGasUpdated(update.destChainSelector, update.usdPerUnitGas, block.timestamp);
+      emit UsdPerUnitGasUpdated(priceUpdates.destChainSelector, priceUpdates.usdPerUnitGas, block.timestamp);
     }
   }
 
   // ================================================================
-  // │                           Access                             │
+  // |                           Access                             |
   // ================================================================
 
   /// @notice Get the list of price updaters.

@@ -2,10 +2,6 @@
 
 ## Unreleased
 
-...
-
-## 0.7.1 - 2023-09-20
-
 ### Changed
 
 - Add Chainlink Functions v1.0.0 (#9365)

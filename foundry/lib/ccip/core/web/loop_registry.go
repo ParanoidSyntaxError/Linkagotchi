@@ -48,12 +48,19 @@ func (l *LoopRegistryServer) discoveryHandler(w http.ResponseWriter, req *http.R
 	w.Header().Set("Content-Type", "application/json")
 	var groups []*targetgroup.Group
 
-	// add node metrics to service discovery
-	groups = append(groups, metricTarget(l.discoveryHostName, l.exposedPromPort, "/metrics"))
-
-	// add all the plugins
 	for _, registeredPlugin := range l.registry.List() {
-		groups = append(groups, metricTarget(l.discoveryHostName, l.exposedPromPort, pluginMetricPath(registeredPlugin.Name)))
+		// create a metric target for each running plugin
+		target := &targetgroup.Group{
+			Targets: []model.LabelSet{
+				// target address will be called by external prometheus
+				{model.AddressLabel: model.LabelValue(fmt.Sprintf("%s:%d", l.discoveryHostName, l.exposedPromPort))},
+			},
+			Labels: map[model.LabelName]model.LabelValue{
+				model.MetricsPathLabel: model.LabelValue(pluginMetricPath(registeredPlugin.Name)),
+			},
+		}
+
+		groups = append(groups, target)
 	}
 
 	b, err := l.jsonMarshalFn(groups)
@@ -71,18 +78,6 @@ func (l *LoopRegistryServer) discoveryHandler(w http.ResponseWriter, req *http.R
 		l.logger.Error(err)
 	}
 
-}
-
-func metricTarget(hostName string, port int, path string) *targetgroup.Group {
-	return &targetgroup.Group{
-		Targets: []model.LabelSet{
-			// target address will be called by external prometheus
-			{model.AddressLabel: model.LabelValue(fmt.Sprintf("%s:%d", hostName, port))},
-		},
-		Labels: map[model.LabelName]model.LabelValue{
-			model.MetricsPathLabel: model.LabelValue(path),
-		},
-	}
 }
 
 // pluginMetricHandlers routes from endpoints published in service discovery to the the backing LOOP endpoint

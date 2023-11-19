@@ -1,21 +1,21 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.17;
 
 import {Base64} from "@openzeppelin/utils/Base64.sol";
 import {Strings} from "@openzeppelin/utils/Strings.sol";
+import {Ownable} from "@openzeppelin/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/token/ERC20/IERC20.sol";
-import {ERC721} from "@openzeppelin/token/ERC721/ERC721.sol";
+import {ERC721Enumerable, ERC721} from "@openzeppelin/token/ERC721/extensions/ERC721Enumerable.sol";
 
-import {VRFConsumerBaseV2} from "@chainlink/vrf/VRFConsumerBaseV2.sol";
+import {VRFV2WrapperConsumerBase} from "@chainlink/vrf/VRFV2WrapperConsumerBase.sol";
 import {VRFCoordinatorV2Interface} from "@chainlink/vrf/interfaces/VRFCoordinatorV2Interface.sol";
-
-import {ERC721ConsecutiveMint} from "./token/ERC721/ERC721ConsecutiveMint.sol";
 
 import {ILinkagotchi} from "./ILinkagotchi.sol";
 
-contract Linkagotchi is ILinkagotchi, ERC721ConsecutiveMint, VRFConsumerBaseV2 {
+contract Linkagotchi is ILinkagotchi, ERC721Enumerable, VRFV2WrapperConsumerBase, Ownable {
     struct TokenData {
         uint256 lifeCycle;
+        uint256 lifeCycleBlockstamp;
         uint256 species;
 
         uint256 hunger;
@@ -25,23 +25,26 @@ contract Linkagotchi is ILinkagotchi, ERC721ConsecutiveMint, VRFConsumerBaseV2 {
         uint256 sicknessBlockstamp;
     }
 
-    address private immutable _linkToken;
+    address public immutable linkToken;
 
-    address private immutable _vrfCoordinator;
     // VRF request ID => Token ID
     mapping(uint256 => uint256) private _vrfTokenIds;
 
     mapping(uint256 => TokenData) private _tokens;
 
-    uint256 public immutable blockMultiplier;
+    uint256 private constant _MINT_COST = 0.1 ether;
 
-    uint256 public constant FEED_FEE = 1;
-    uint256 public constant MEDICINE_FEE = 1;
+    uint256 private immutable _blockMultiplier;
+
+    uint256 private constant _FEED_COST = 1;
+    uint256 private constant _HEAL_COST = 1;
+
+    uint256 private _growthRate = 50; // Number of blocks between growths multiplied by blockMultiplier
 
     uint256 private constant _MAX_HUNGER = 108000;
 
     uint256 private constant _MAX_SICKNESS = 100;
-    uint256 private _sicknessRate = 2500;
+    uint256 private _sicknessRate = 5; // Number of blocks between sickness rolls multiplied by blockMultiplier
     uint256 private constant _SICKNESS_CHANCE = 10;
     uint256 private constant _SICKNESS_AMOUNT = 15;
     uint256 private constant _SICKNESS_HUNGER_MULTIPLIER = 2;
@@ -51,89 +54,40 @@ contract Linkagotchi is ILinkagotchi, ERC721ConsecutiveMint, VRFConsumerBaseV2 {
 
     constructor(
         uint256 blockMulti,
-        address linkToken,
-        address vrfCoordinator
+        address link,
+        address vrfWrapper
     ) ERC721(
-        "Linkgotchi", 
-        "LINKGOTCHI"
-    ) VRFConsumerBaseV2(
-        vrfCoordinator
+        "Linkagotchi", 
+        "LINKAGOTCHI"
+    ) VRFV2WrapperConsumerBase(
+        link,
+        vrfWrapper
     ) {
-        blockMultiplier = blockMulti;
+        _blockMultiplier = blockMulti;
+        _sicknessRate *= blockMulti;
+        _growthRate *= blockMulti;
 
-        _sicknessRate *= blockMultiplier;
-
-        _linkToken = linkToken;
-        _vrfCoordinator = vrfCoordinator;
+        linkToken = link;
 
         _speciesLengths = [
             5
         ];
     }
 
-    function debugMint(address receiver) external returns (uint256 requestId, uint256 id) {    
-        id = _nextTokenId();
-        requestId = id;
-
-        _vrfTokenIds[id] = id;
-
-        _consecutiveMint(receiver);
+    function blockMultiplier() external view override returns (uint256) {
+        return _blockMultiplier;
     }
 
-    function debugFulfillRandomWords(uint256 requestId, uint256 randomWords) external {
-        _newToken(_vrfTokenIds[requestId], randomWords);
+    function mintCost() external pure override returns (uint256) {
+        return _MINT_COST;
     }
 
-    /**
-        @notice Mint a new token
-    
-        @param receiver Address to receive the minted token
-
-        @return requestId ID of the VRF request
-        @return id ID of the minted token
-    */
-    function mint(address receiver) external override returns (uint256 requestId, uint256 id) {      
-        id = _nextTokenId();
-
-        requestId = VRFCoordinatorV2Interface(_vrfCoordinator).requestRandomWords(
-            "", //TODO
-            0,  //TODO
-            0,  //TODO
-            0,  //TODO
-            1
-        );
-        _vrfTokenIds[requestId] = id;
-
-        _consecutiveMint(receiver);
+    function feedCost() external pure override returns (uint256) {
+        return _FEED_COST;
     }
 
-    /**
-        @notice Feed a Linkagotchi
-    
-        @param id Token ID
-        @param amount Amount hunger is decreased by
-    */
-    function feed(uint256 id, uint256 amount) external override {
-        _requireMinted(id);
-        require(_sickness(id) == 0);
-
-        IERC20(_linkToken).transferFrom(msg.sender, address(this), amount * FEED_FEE);
-
-        _feed(id, amount);
-    }
-
-    /**
-        @notice Cure a Linkagotchi
-    
-        @param id Token ID
-        @param amount Amount sickness is decreased by
-    */
-    function medicine(uint256 id, uint256 amount) external override {
-        _requireMinted(id);
-
-        IERC20(_linkToken).transferFrom(msg.sender, address(this), amount * MEDICINE_FEE);
-
-        _medicine(id, amount);
+    function healCost() external pure override returns (uint256) {
+        return _HEAL_COST;
     }
 
     /**
@@ -148,7 +102,61 @@ contract Linkagotchi is ILinkagotchi, ERC721ConsecutiveMint, VRFConsumerBaseV2 {
         @return alive Is the Linkagotchi alive
     */
     function stats(uint256 id) external view override returns (uint256, uint256, uint256, uint256, bool) {
-        return (_tokens[id].lifeCycle, _tokens[id].species, _hunger(id), _sickness(id), _isAlive(id));
+        return (_lifeCycle(id), _species(id), _hunger(id), _sickness(id), _isAlive(id));
+    }
+
+    /**
+        @notice Mint a new token
+    
+        @param receiver Address to receive the minted token
+        @param vrfFee Amount of LINK tokens to pay the VRF coordinator
+        @param callbackGasLimit Limit of how much gas to use for the callback
+
+        @return requestId ID of the VRF request
+        @return id ID of the minted token
+    */
+    function mint(address receiver, uint256 vrfFee, uint32 callbackGasLimit) public virtual override returns (uint256 requestId, uint256 id) {      
+        IERC20(linkToken).transferFrom(msg.sender, address(this), _MINT_COST + vrfFee);
+        
+        id = totalSupply();
+
+        requestId = requestRandomness(
+            callbackGasLimit,
+            3,
+            1
+        );
+        _vrfTokenIds[requestId] = id;
+
+        _safeMint(receiver, id);
+    }
+
+    /**
+        @notice Feed a Linkagotchi
+    
+        @param id Token ID
+        @param amount Amount hunger is decreased by
+    */
+    function feed(uint256 id, uint256 amount) external override {
+        _requireMinted(id);
+        require(_sickness(id) == 0);
+
+        IERC20(linkToken).transferFrom(msg.sender, address(this), amount * _FEED_COST);
+
+        _feed(id, amount);
+    }
+
+    /**
+        @notice Cure a Linkagotchi
+    
+        @param id Token ID
+        @param amount Amount sickness is decreased by
+    */
+    function heal(uint256 id, uint256 amount) external override {
+        _requireMinted(id);
+
+        IERC20(linkToken).transferFrom(msg.sender, address(this), amount * _HEAL_COST);
+
+        _heal(id, amount);
     }
 
     /**
@@ -172,33 +180,14 @@ contract Linkagotchi is ILinkagotchi, ERC721ConsecutiveMint, VRFConsumerBaseV2 {
     }
 
     /**
-        @dev See {VRFConsumerBaseV2-fulfillRandomWords}.
+        @notice Withdraw contracts tokens
+
+        @param token Token contract
+        @param receiver Receiver of tokens
+        @param amount Amount of tokens to withdraw
     */
-    function fulfillRandomWords(uint256 requestId, uint256[] memory randomWords) internal override {
-        _newToken(_vrfTokenIds[requestId], randomWords[0]);
-    }
-
-    function _newToken(uint256 id, uint256 random) internal {
-        _tokens[id].species = _randomSpecies(0, random);
-        _tokens[id].hungerTimestamp = block.timestamp;
-        _tokens[id].sicknessBlockstamp = block.number;
-    }
-
-    function _setToken(uint256 id, TokenData memory tokenData) internal {
-        _tokens[id] = tokenData;
-    }
-
-    function _grow(uint256 id, uint256 random) internal {
-        _tokens[id].lifeCycle++;
-        _tokens[id].species = _randomSpecies(_tokens[id].lifeCycle, random);
-    }
-
-    function _feed(uint256 id, uint256 amount) internal {
-        _tokens[id].hunger = _safeSubtraction(_tokens[id].hunger, amount);
-    }
-
-    function _medicine(uint256 id, uint256 amount) internal {
-        _tokens[id].sickness = _safeSubtraction(_tokens[id].sickness, amount);
+    function withdraw(address token, address receiver, uint256 amount) external onlyOwner {
+        IERC20(token).transfer(receiver, amount);
     }
 
     function _token(uint256 id) internal view returns (TokenData memory tokenData) {
@@ -208,6 +197,24 @@ contract Linkagotchi is ILinkagotchi, ERC721ConsecutiveMint, VRFConsumerBaseV2 {
     function _randomSpecies(uint256 lifeCycle, uint256 random) internal view returns (uint256) {
         return random % _speciesLengths[lifeCycle];
     }   
+
+    function _lifeCycle(uint256 id) internal view returns (uint256) {
+        if (block.number > _tokens[id].lifeCycleBlockstamp + _growthRate && 
+            _tokens[id].lifeCycle < _speciesLengths.length) {
+            return _tokens[id].lifeCycle + 1;
+        }
+
+        return _tokens[id].lifeCycle;
+    }
+
+    function _species(uint256 id) internal view returns (uint256) {
+        if (block.number > _tokens[id].lifeCycleBlockstamp + _growthRate && 
+            _tokens[id].lifeCycle < _speciesLengths.length) {
+            return _randomSpecies(_tokens[id].lifeCycle, _blockhashRandom(id, _tokens[id].lifeCycleBlockstamp + _growthRate));
+        }
+
+        return _tokens[id].species;
+    }
 
     function _hunger(uint256 id) internal view returns (uint256) {
         return _tokens[id].hunger + (block.timestamp - _tokens[id].hungerTimestamp);
@@ -233,6 +240,37 @@ contract Linkagotchi is ILinkagotchi, ERC721ConsecutiveMint, VRFConsumerBaseV2 {
         } 
 
         return true;
+    }
+
+    /**
+        @dev See {VRFConsumerBaseV2-fulfillRandomWords}.
+    */
+    function fulfillRandomWords(uint256 requestId, uint256[] memory randomWords) internal override {
+        _newToken(_vrfTokenIds[requestId], randomWords[0]);
+    }
+
+    function _newToken(uint256 id, uint256 random) internal {
+        _tokens[id].lifeCycleBlockstamp = block.number;
+        _tokens[id].species = _randomSpecies(0, random);
+        _tokens[id].hungerTimestamp = block.timestamp;
+        _tokens[id].sicknessBlockstamp = block.number;
+    }
+
+    function _setToken(uint256 id, TokenData memory tokenData) internal {
+        _tokens[id] = tokenData;
+    }
+
+    function _grow(uint256 id, uint256 random) internal {
+        _tokens[id].lifeCycle++;
+        _tokens[id].species = _randomSpecies(_tokens[id].lifeCycle, random);
+    }
+
+    function _feed(uint256 id, uint256 amount) internal {
+        _tokens[id].hunger = _safeSubtraction(_tokens[id].hunger, amount);
+    }
+
+    function _heal(uint256 id, uint256 amount) internal {
+        _tokens[id].sickness = _safeSubtraction(_tokens[id].sickness, amount);
     }
 
     function _tokenSvg(bytes memory svgHash) internal pure returns (string memory) {
@@ -271,6 +309,10 @@ contract Linkagotchi is ILinkagotchi, ERC721ConsecutiveMint, VRFConsumerBaseV2 {
     }
 
     function _tokenSvgHash(uint256 id) internal view returns (bytes memory) {
+        if(_tokens[id].hungerTimestamp == 0) {
+            return hex"00";
+        }
+
         if(_tokens[id].lifeCycle == 0) {
             if(_tokens[id].species == 0) {
                 return hex"00015612016446017321017A21006611008512007911";
@@ -304,18 +346,22 @@ contract Linkagotchi is ILinkagotchi, ERC721ConsecutiveMint, VRFConsumerBaseV2 {
     }
     
     function _tokenAttributes(uint256 id) internal view returns (string memory) {
+        if(_tokens[id].hungerTimestamp == 0) {
+            return "[]";
+        }
+
         string memory attributes = string(abi.encodePacked(
             '{"trait_type":"Life cycle","value":"',
-            Strings.toString(_tokens[id].lifeCycle),
+            Strings.toString(_lifeCycle(id)),
             '"},',
             '{"trait_type":"Species","value":"',
-            Strings.toString(_tokens[id].species),
+            Strings.toString(_species(id)),
             '"},',
             '{"trait_type":"Sickness","value":"',
-            Strings.toString(_tokens[id].sickness),
+            Strings.toString(_sickness(id)),
             '"},',
             '{"trait_type":"Hunger","value":"',
-            Strings.toString(_tokens[id].hunger),
+            Strings.toString(_hunger(id)),
             '"}'
         ));
 
@@ -323,9 +369,7 @@ contract Linkagotchi is ILinkagotchi, ERC721ConsecutiveMint, VRFConsumerBaseV2 {
     }
 
     function _blockhashRandom(uint256 id, uint256 blockNumber) internal view returns (uint256) {
-        unchecked {
-            return uint256(blockhash(blockNumber)) * id;   
-        }
+        return uint256(keccak256(abi.encodePacked(blockhash(blockNumber), id)));
     }
 
     function _bytesToVector(bytes1 value) internal pure returns (uint256, uint256) {

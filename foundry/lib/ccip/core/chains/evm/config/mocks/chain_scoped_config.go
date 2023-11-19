@@ -3,6 +3,8 @@
 package mocks
 
 import (
+	big "math/big"
+
 	config "github.com/smartcontractkit/chainlink/v2/core/chains/evm/config"
 	coreconfig "github.com/smartcontractkit/chainlink/v2/core/config"
 
@@ -98,6 +100,22 @@ func (_m *ChainScopedConfig) Database() coreconfig.Database {
 	return r0
 }
 
+// DefaultChainID provides a mock function with given fields:
+func (_m *ChainScopedConfig) DefaultChainID() *big.Int {
+	ret := _m.Called()
+
+	var r0 *big.Int
+	if rf, ok := ret.Get(0).(func() *big.Int); ok {
+		r0 = rf()
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*big.Int)
+		}
+	}
+
+	return r0
+}
+
 // EVM provides a mock function with given fields:
 func (_m *ChainScopedConfig) EVM() config.EVM {
 	ret := _m.Called()
@@ -137,6 +155,22 @@ func (_m *ChainScopedConfig) EVMRPCEnabled() bool {
 		r0 = rf()
 	} else {
 		r0 = ret.Get(0).(bool)
+	}
+
+	return r0
+}
+
+// Explorer provides a mock function with given fields:
+func (_m *ChainScopedConfig) Explorer() coreconfig.Explorer {
+	ret := _m.Called()
+
+	var r0 coreconfig.Explorer
+	if rf, ok := ret.Get(0).(func() coreconfig.Explorer); ok {
+		r0 = rf()
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(coreconfig.Explorer)
+		}
 	}
 
 	return r0
@@ -230,6 +264,22 @@ func (_m *ChainScopedConfig) Keeper() coreconfig.Keeper {
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).(coreconfig.Keeper)
+		}
+	}
+
+	return r0
+}
+
+// LegacyGasStation provides a mock function with given fields:
+func (_m *ChainScopedConfig) LegacyGasStation() coreconfig.LegacyGasStation {
+	ret := _m.Called()
+
+	var r0 coreconfig.LegacyGasStation
+	if rf, ok := ret.Get(0).(func() coreconfig.LegacyGasStation); ok {
+		r0 = rf()
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(coreconfig.LegacyGasStation)
 		}
 	}
 

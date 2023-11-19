@@ -65,11 +65,6 @@ install_gotestfmt:
 build_test_image:
 	./scripts/buildTestImage $(tag) $(base_tag) "$(suite)" $(push)
 
-#Build a chainlink docker image for local testing and push to k3d registry
-.PHONY: build_push_docker_image
-build_push_docker_image:
-	docker build -f ../core/chainlink.Dockerfile --build-arg COMMIT_SHA=$(git rev-parse HEAD) --build-arg CHAINLINK_USER=chainlink -t localhost:5000/chainlink:develop ../ ; docker push localhost:5000/chainlink:develop
-
 ## Test Runner
 .PHONY: run
 run: # Need to set network first in case it's unset. Doesn't matter for the runner
@@ -78,6 +73,30 @@ run: # Need to set network first in case it's unset. Doesn't matter for the runn
 ## All commands will use 16 threads to run tests in parallel. To change this, use -test.parallel n
 
 # Smoke
+.PHONY: test_smoke_raw # Run smoke tests without any gotestfmt or default args
+test_smoke_raw:
+	go test $(args) ./smoke
+
+.PHONY: test_smoke
+test_smoke: install_gotestfmt ## Run all smoke tests
+	TEST_LOG_LEVEL="disabled" \
+	go test -timeout 24h -count=1 -json $(args) ./smoke 2>&1 | tee /tmp/gotest.log | gotestfmt
+
+.PHONY: test_smoke_simulated
+test_smoke_simulated: install_gotestfmt ## Run all smoke tests on simulated blockchain
+	TEST_LOG_LEVEL="disabled" \
+	SELECTED_NETWORKS="SIMULATED,SIMULATED_1,SIMULATED_2" \
+	go test -timeout 1h -count=1 -json $(args) ./smoke 2>&1 | tee /tmp/gotest.log | gotestfmt
+
+.PHONY: test_smoke_verbose
+test_smoke_verbose: ## Run all smoke tests with verbose logging
+	go test -timeout 24h -count=1 -v $(args) ./smoke
+
+.PHONY: test_smoke_simulated_verbose
+test_smoke_simulated_verbose: ## Run all smoke tests with verbose logging
+	SELECTED_NETWORKS="SIMULATED,SIMULATED_1,SIMULATED_2" \
+	go test -timeout 24h -count=1 -v $(args) ./smoke
+
 .PHONY: test_smoke_product
 test_smoke_product: ## Run smoke tests for specific product ex: make test_smoke_product product="cron" args="--focus @cron -p"
 	ARGS="$(args)" PRODUCT=$(product) ./scripts/run_product_tests
@@ -104,6 +123,16 @@ test_chaos_network: install_gotestfmt ## Run all smoke tests
 .PHONY: test_chaos_verbose
 test_chaos_verbose: ## Run all smoke tests with verbose logging
 	go test -timeout 24h -count=1 -v $(args) ./chaos
+
+.PHONY: test_chaos_ccip_pods_raw
+test_chaos_ccip_pods_raw:
+	DATABASE_URL="postgresql://postgres:node@localhost:5432/chainlink_test?sslmode=disable" \
+	go test -timeout 2h -v -count=1 $(args) -p 2 -run 'TestChaosCCIP/.*pod-chaos' ./chaos
+
+.PHONY: test_chaos_ccip_network_raw
+test_chaos_ccip_network_raw:
+	DATABASE_URL="postgresql://postgres:node@localhost:5432/chainlink_test?sslmode=disable" \
+	go test -timeout 2h -v -count=1 $(args) -p 2 -run 'TestChaosCCIP/.*network-chaos' ./chaos
 
 # Performance
 .PHONY: test_perf
@@ -168,24 +197,31 @@ test_benchmark_automation: ## Run the automation benchmark tests
 test_reorg_automation: ## Run the automation reorg tests
 	go test -timeout 300m -v -run ^TestAutomationReorg$$ ./reorg -count=1 | tee automation_reorg_run_`date +"%Y%m%d-%H%M%S"`.log
 
-# image: the name for the chainlink image being built, example: image=chainlink
-# tag: the tag for the chainlink image being built, example: tag=latest
-# example usage: make build_docker_image image=chainlink tag=latest
-.PHONY: build_docker_image
-build_docker_image:
-	docker build -f ../core/chainlink.Dockerfile --build-arg COMMIT_SHA=$(git rev-parse HEAD) --build-arg CHAINLINK_USER=chainlink -t $(image):$(tag) ../
+.PHONY: test_smoke_ccip_simulated
+test_smoke_ccip_simulated: ## Run ccip smoke tests with verbose logging
+	DATABASE_URL="postgresql://postgres:node@localhost:5432/chainlink_test?sslmode=disable" \
+	SELECTED_NETWORKS="SIMULATED,SIMULATED_1,SIMULATED_2" \
+	go test -timeout 24h -count=1 -v $(args) -v -run ^TestSmokeCCIPForBidirectionalLane ./smoke
 
+.PHONY: test_load_ccip_simulated
+test_load_ccip_simulated: ## Run ccip load tests with verbose logging
+	DATABASE_URL="postgresql://postgres:node@localhost:5432/chainlink_test?sslmode=disable" \
+	SELECTED_NETWORKS="SIMULATED,SIMULATED_1,SIMULATED_2" \
+	go test -timeout 24h -count=1 -v $(args) -v -run ^TestLoadCCIPStableRPS$$ ./load
 
-# image: the name for the chainlink image being built, example: image=chainlink
-# tag: the tag for the chainlink image being built, example: tag=latest
-# args: the args to pass to the test runner, example: args="--focus @cron -p"
-# product: the product to run tests for, example: product=cron
-# example usage: make run_test_with_local_image image=chainlink tag=latest-dev product=cron
-.PHONY: run_test_with_local_image
-run_test_with_local_image: build_docker_image
-	CHAINLINK_IMAGE=$(image) \
-	CHAINLINK_VERSION=$(tag) \
-	SELECTED_NETWORKS="SIMULATED,SIMULATED_1,SIMULATED_2"  \
-	ARGS="$(args)" \
-	PRODUCT=$(product) 	\
-	./scripts/run_product_tests
+.PHONY: test_smoke_ccip
+test_smoke_ccip: ## Run ccip smoke tests with verbose logging
+	DATABASE_URL="postgresql://postgres:node@localhost:5432/chainlink_test?sslmode=disable" \
+	go test -timeout 24h -count=1 -v $(args) -v -run ^TestSmokeCCIPForBidirectionalLane ./smoke
+
+.PHONY: test_load_ccip
+test_load_ccip: ## Run ccip load tests with verbose logging
+	DATABASE_URL="postgresql://postgres:node@localhost:5432/chainlink_test?sslmode=disable" \
+	go test -timeout 24h -count=1 -v $(args) -v -run ^TestLoadCCIPStableRPS$$ ./load
+
+.PHONY: test_soak_ccip
+test_soak_ccip: ## Run ccip load tests with verbose logging
+	DATABASE_URL="postgresql://postgres:node@localhost:5432/chainlink_test?sslmode=disable" \
+	CCIP_LOAD_TEST_RATEUNIT=1m \
+	CCIP_LOAD_TEST_RATE=5 \
+	go test -timeout 24h -count=1 -v $(args) -v -run ^TestLoadCCIPStableRPS$$ ./load

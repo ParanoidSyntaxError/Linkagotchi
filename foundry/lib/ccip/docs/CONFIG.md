@@ -20,11 +20,18 @@ HTTPURL = 'https://foo.bar' # Required
 
 ## Global
 ```toml
+ExplorerURL = 'ws://explorer.url' # Example
 InsecureFastScrypt = false # Default
 RootDir = '~/.chainlink' # Default
 ShutdownGracePeriod = '5s' # Default
 ```
 
+
+### ExplorerURL
+```toml
+ExplorerURL = 'ws://explorer.url' # Example
+```
+ExplorerURL is the websocket URL used by the node to push stats. This variable is required to deliver telemetry.
 
 ### InsecureFastScrypt
 :warning: **_ADVANCED_**: _Do not change this setting unless you know what you are doing._
@@ -52,6 +59,7 @@ FeedsManager = true # Default
 LogPoller = false # Default
 UICSAKeys = false # Default
 CCIP = false # Default
+LegacyGasStation = false # Default
 ```
 
 
@@ -77,7 +85,13 @@ UICSAKeys enables CSA Keys in the UI.
 ```toml
 CCIP = false # Default
 ```
-CCIP enables the CCIP service.
+CCIP enables the Cross Chain Interoperability Protocol
+
+### LegacyGasStation
+```toml
+LegacyGasStation = false # Default
+```
+LegacyGasStation is an experimental feature that enables meta-transactions for token transfers
 
 ## Database
 ```toml
@@ -277,13 +291,13 @@ Logging toggles verbose logging of the raw telemetry messages being sent.
 ```toml
 ServerPubKey = 'test-pub-key' # Example
 ```
-ServerPubKey is the public key of the telemetry server. This field will be removed in a furture version
+ServerPubKey is the public key of the telemetry server.
 
 ### URL
 ```toml
 URL = 'https://prom.test' # Example
 ```
-URL is where to send telemetry. This field will be removed in a furture version
+URL is where to send telemetry.
 
 ### BufferSize
 ```toml
@@ -314,40 +328,6 @@ SendTimeout is the max duration to wait for the request to complete when sending
 UseBatchSend = true # Default
 ```
 UseBatchSend toggles sending telemetry to the ingress server using the batch client.
-
-## TelemetryIngress.Endpoints
-```toml
-[[TelemetryIngress.Endpoints]] # Example
-Network = 'EVM' # Example
-ChainID = '111551111' # Example
-ServerPubKey = 'test-pub-key-111551111-evm' # Example
-URL = 'localhost-111551111-evm:9000' # Example
-```
-
-
-### Network
-```toml
-Network = 'EVM' # Example
-```
-Network aka EVM, Solana, Starknet
-
-### ChainID
-```toml
-ChainID = '111551111' # Example
-```
-ChainID of the network
-
-### ServerPubKey
-```toml
-ServerPubKey = 'test-pub-key-111551111-evm' # Example
-```
-ServerPubKey is the public key of the telemetry server.
-
-### URL
-```toml
-URL = 'localhost-111551111-evm:9000' # Example
-```
-URL is where to send telemetry.
 
 ## AuditLogger
 ```toml
@@ -1473,7 +1453,7 @@ AutoCreateKey = true
 BlockBackfillDepth = 10
 BlockBackfillSkip = false
 FinalityDepth = 50
-FinalityTagEnabled = true
+FinalityTagEnabled = false
 LinkContractAddress = '0x514910771AF9Ca656af840dff83E8264EcF986CA'
 LogBackfillBatchSize = 1000
 LogPollInterval = '15s'
@@ -1787,7 +1767,7 @@ BlockBackfillDepth = 10
 BlockBackfillSkip = false
 ChainType = 'optimismBedrock'
 FinalityDepth = 200
-FinalityTagEnabled = true
+FinalityTagEnabled = false
 LinkContractAddress = '0x350a791Bfc2C21F9Ed5d10980Dad2e2638ffa7f6'
 LogBackfillBatchSize = 1000
 LogPollInterval = '2s'
@@ -2100,7 +2080,7 @@ AutoCreateKey = true
 BlockBackfillDepth = 10
 BlockBackfillSkip = false
 FinalityDepth = 50
-FinalityTagEnabled = true
+FinalityTagEnabled = false
 LinkContractAddress = '0x404460C6A5EdE2D891e8297795264fDe62ADBB75'
 LogBackfillBatchSize = 1000
 LogPollInterval = '3s'
@@ -2317,84 +2297,6 @@ ContractConfirmations = 4
 ContractTransmitterTransmitTimeout = '10s'
 DatabaseTimeout = '10s'
 ObservationGracePeriod = '1s'
-
-[OCR2]
-[OCR2.Automation]
-GasLimit = 5300000
-```
-
-</p></details>
-
-<details><summary>BSC Testnet (97)</summary><p>
-
-```toml
-AutoCreateKey = true
-BlockBackfillDepth = 10
-BlockBackfillSkip = false
-FinalityDepth = 50
-FinalityTagEnabled = true
-LinkContractAddress = '0x84b9B910527Ad5C03A9Ca831909E21e236EA7b06'
-LogBackfillBatchSize = 1000
-LogPollInterval = '3s'
-LogKeepBlocksDepth = 100000
-MinIncomingConfirmations = 3
-MinContractPayment = '0.00001 link'
-NonceAutoSync = true
-NoNewHeadsThreshold = '30s'
-RPCDefaultBatchSize = 250
-RPCBlockQueryDelay = 2
-
-[Transactions]
-ForwardersEnabled = false
-MaxInFlight = 16
-MaxQueued = 250
-ReaperInterval = '1h0m0s'
-ReaperThreshold = '168h0m0s'
-ResendAfterThreshold = '1m0s'
-
-[BalanceMonitor]
-Enabled = true
-
-[GasEstimator]
-Mode = 'BlockHistory'
-PriceDefault = '5 gwei'
-PriceMax = '115792089237316195423570985008687907853269984665.640564039457584007913129639935 tether'
-PriceMin = '1 gwei'
-LimitDefault = 500000
-LimitMax = 500000
-LimitMultiplier = '1'
-LimitTransfer = 21000
-BumpMin = '5 gwei'
-BumpPercent = 20
-BumpThreshold = 5
-EIP1559DynamicFees = false
-FeeCapDefault = '100 gwei'
-TipCapDefault = '1 wei'
-TipCapMin = '1 wei'
-
-[GasEstimator.BlockHistory]
-BatchSize = 25
-BlockHistorySize = 24
-CheckInclusionBlocks = 12
-CheckInclusionPercentile = 90
-TransactionPercentile = 60
-
-[HeadTracker]
-HistoryDepth = 100
-MaxBufferSize = 3
-SamplingInterval = '1s'
-
-[NodePool]
-PollFailureThreshold = 5
-PollInterval = '10s'
-SelectionMode = 'HighestHead'
-SyncThreshold = 10
-
-[OCR]
-ContractConfirmations = 4
-ContractTransmitterTransmitTimeout = '2s'
-DatabaseTimeout = '2s'
-ObservationGracePeriod = '500ms'
 
 [OCR2]
 [OCR2.Automation]
@@ -2716,84 +2618,6 @@ GasLimit = 3800000
 
 </p></details>
 
-<details><summary>Kroma Mainnet (255)</summary><p>
-
-```toml
-AutoCreateKey = true
-BlockBackfillDepth = 10
-BlockBackfillSkip = false
-ChainType = 'kroma'
-FinalityDepth = 400
-FinalityTagEnabled = true
-LogBackfillBatchSize = 1000
-LogPollInterval = '2s'
-LogKeepBlocksDepth = 100000
-MinIncomingConfirmations = 1
-MinContractPayment = '0.00001 link'
-NonceAutoSync = true
-NoNewHeadsThreshold = '40s'
-RPCDefaultBatchSize = 250
-RPCBlockQueryDelay = 1
-
-[Transactions]
-ForwardersEnabled = false
-MaxInFlight = 16
-MaxQueued = 250
-ReaperInterval = '1h0m0s'
-ReaperThreshold = '168h0m0s'
-ResendAfterThreshold = '30s'
-
-[BalanceMonitor]
-Enabled = true
-
-[GasEstimator]
-Mode = 'BlockHistory'
-PriceDefault = '20 gwei'
-PriceMax = '115792089237316195423570985008687907853269984665.640564039457584007913129639935 tether'
-PriceMin = '1 wei'
-LimitDefault = 500000
-LimitMax = 500000
-LimitMultiplier = '1'
-LimitTransfer = 21000
-BumpMin = '100 wei'
-BumpPercent = 20
-BumpThreshold = 3
-EIP1559DynamicFees = true
-FeeCapDefault = '100 gwei'
-TipCapDefault = '1 wei'
-TipCapMin = '1 wei'
-
-[GasEstimator.BlockHistory]
-BatchSize = 25
-BlockHistorySize = 24
-CheckInclusionBlocks = 12
-CheckInclusionPercentile = 90
-TransactionPercentile = 60
-
-[HeadTracker]
-HistoryDepth = 400
-MaxBufferSize = 3
-SamplingInterval = '1s'
-
-[NodePool]
-PollFailureThreshold = 5
-PollInterval = '10s'
-SelectionMode = 'HighestHead'
-SyncThreshold = 10
-
-[OCR]
-ContractConfirmations = 1
-ContractTransmitterTransmitTimeout = '10s'
-DatabaseTimeout = '10s'
-ObservationGracePeriod = '1s'
-
-[OCR2]
-[OCR2.Automation]
-GasLimit = 5300000
-```
-
-</p></details>
-
 <details><summary>Optimism Goerli (420)</summary><p>
 
 ```toml
@@ -2802,7 +2626,7 @@ BlockBackfillDepth = 10
 BlockBackfillSkip = false
 ChainType = 'optimismBedrock'
 FinalityDepth = 200
-FinalityTagEnabled = true
+FinalityTagEnabled = false
 LinkContractAddress = '0xdc2CC710e42857672E7907CF474a69B63B93089f'
 LogBackfillBatchSize = 1000
 LogPollInterval = '2s'
@@ -3106,162 +2930,6 @@ GasLimit = 5300000
 
 </p></details>
 
-<details><summary>WeMix Mainnet (1111)</summary><p>
-
-```toml
-AutoCreateKey = true
-BlockBackfillDepth = 10
-BlockBackfillSkip = false
-ChainType = 'wemix'
-FinalityDepth = 1
-FinalityTagEnabled = false
-LogBackfillBatchSize = 1000
-LogPollInterval = '3s'
-LogKeepBlocksDepth = 100000
-MinIncomingConfirmations = 1
-MinContractPayment = '0.00001 link'
-NonceAutoSync = true
-NoNewHeadsThreshold = '30s'
-RPCDefaultBatchSize = 250
-RPCBlockQueryDelay = 1
-
-[Transactions]
-ForwardersEnabled = false
-MaxInFlight = 16
-MaxQueued = 250
-ReaperInterval = '1h0m0s'
-ReaperThreshold = '168h0m0s'
-ResendAfterThreshold = '1m0s'
-
-[BalanceMonitor]
-Enabled = true
-
-[GasEstimator]
-Mode = 'BlockHistory'
-PriceDefault = '20 gwei'
-PriceMax = '115792089237316195423570985008687907853269984665.640564039457584007913129639935 tether'
-PriceMin = '1 gwei'
-LimitDefault = 500000
-LimitMax = 500000
-LimitMultiplier = '1'
-LimitTransfer = 21000
-BumpMin = '5 gwei'
-BumpPercent = 20
-BumpThreshold = 3
-EIP1559DynamicFees = true
-FeeCapDefault = '100 gwei'
-TipCapDefault = '100 gwei'
-TipCapMin = '1 wei'
-
-[GasEstimator.BlockHistory]
-BatchSize = 25
-BlockHistorySize = 8
-CheckInclusionBlocks = 12
-CheckInclusionPercentile = 90
-TransactionPercentile = 60
-
-[HeadTracker]
-HistoryDepth = 100
-MaxBufferSize = 3
-SamplingInterval = '1s'
-
-[NodePool]
-PollFailureThreshold = 5
-PollInterval = '10s'
-SelectionMode = 'HighestHead'
-SyncThreshold = 5
-
-[OCR]
-ContractConfirmations = 1
-ContractTransmitterTransmitTimeout = '10s'
-DatabaseTimeout = '10s'
-ObservationGracePeriod = '1s'
-
-[OCR2]
-[OCR2.Automation]
-GasLimit = 5300000
-```
-
-</p></details>
-
-<details><summary>WeMix Testnet (1112)</summary><p>
-
-```toml
-AutoCreateKey = true
-BlockBackfillDepth = 10
-BlockBackfillSkip = false
-ChainType = 'wemix'
-FinalityDepth = 1
-FinalityTagEnabled = false
-LogBackfillBatchSize = 1000
-LogPollInterval = '3s'
-LogKeepBlocksDepth = 100000
-MinIncomingConfirmations = 1
-MinContractPayment = '0.00001 link'
-NonceAutoSync = true
-NoNewHeadsThreshold = '30s'
-RPCDefaultBatchSize = 250
-RPCBlockQueryDelay = 1
-
-[Transactions]
-ForwardersEnabled = false
-MaxInFlight = 16
-MaxQueued = 250
-ReaperInterval = '1h0m0s'
-ReaperThreshold = '168h0m0s'
-ResendAfterThreshold = '1m0s'
-
-[BalanceMonitor]
-Enabled = true
-
-[GasEstimator]
-Mode = 'BlockHistory'
-PriceDefault = '20 gwei'
-PriceMax = '115792089237316195423570985008687907853269984665.640564039457584007913129639935 tether'
-PriceMin = '1 gwei'
-LimitDefault = 500000
-LimitMax = 500000
-LimitMultiplier = '1'
-LimitTransfer = 21000
-BumpMin = '5 gwei'
-BumpPercent = 20
-BumpThreshold = 3
-EIP1559DynamicFees = true
-FeeCapDefault = '100 gwei'
-TipCapDefault = '100 gwei'
-TipCapMin = '1 wei'
-
-[GasEstimator.BlockHistory]
-BatchSize = 25
-BlockHistorySize = 8
-CheckInclusionBlocks = 12
-CheckInclusionPercentile = 90
-TransactionPercentile = 60
-
-[HeadTracker]
-HistoryDepth = 100
-MaxBufferSize = 3
-SamplingInterval = '1s'
-
-[NodePool]
-PollFailureThreshold = 5
-PollInterval = '10s'
-SelectionMode = 'HighestHead'
-SyncThreshold = 5
-
-[OCR]
-ContractConfirmations = 1
-ContractTransmitterTransmitTimeout = '10s'
-DatabaseTimeout = '10s'
-ObservationGracePeriod = '1s'
-
-[OCR2]
-[OCR2.Automation]
-GasLimit = 5300000
-```
-
-</p></details>
-
 <details><summary>Simulated (1337)</summary><p>
 
 ```toml
@@ -3325,84 +2993,6 @@ PollFailureThreshold = 5
 PollInterval = '10s'
 SelectionMode = 'HighestHead'
 SyncThreshold = 5
-
-[OCR]
-ContractConfirmations = 1
-ContractTransmitterTransmitTimeout = '10s'
-DatabaseTimeout = '10s'
-ObservationGracePeriod = '1s'
-
-[OCR2]
-[OCR2.Automation]
-GasLimit = 5300000
-```
-
-</p></details>
-
-<details><summary>Kroma Sepolia (2358)</summary><p>
-
-```toml
-AutoCreateKey = true
-BlockBackfillDepth = 10
-BlockBackfillSkip = false
-ChainType = 'kroma'
-FinalityDepth = 400
-FinalityTagEnabled = true
-LogBackfillBatchSize = 1000
-LogPollInterval = '2s'
-LogKeepBlocksDepth = 100000
-MinIncomingConfirmations = 1
-MinContractPayment = '0.00001 link'
-NonceAutoSync = true
-NoNewHeadsThreshold = '40s'
-RPCDefaultBatchSize = 250
-RPCBlockQueryDelay = 1
-
-[Transactions]
-ForwardersEnabled = false
-MaxInFlight = 16
-MaxQueued = 250
-ReaperInterval = '1h0m0s'
-ReaperThreshold = '168h0m0s'
-ResendAfterThreshold = '30s'
-
-[BalanceMonitor]
-Enabled = true
-
-[GasEstimator]
-Mode = 'BlockHistory'
-PriceDefault = '20 gwei'
-PriceMax = '115792089237316195423570985008687907853269984665.640564039457584007913129639935 tether'
-PriceMin = '1 wei'
-LimitDefault = 500000
-LimitMax = 500000
-LimitMultiplier = '1'
-LimitTransfer = 21000
-BumpMin = '100 wei'
-BumpPercent = 20
-BumpThreshold = 3
-EIP1559DynamicFees = true
-FeeCapDefault = '100 gwei'
-TipCapDefault = '1 wei'
-TipCapMin = '1 wei'
-
-[GasEstimator.BlockHistory]
-BatchSize = 25
-BlockHistorySize = 24
-CheckInclusionBlocks = 12
-CheckInclusionPercentile = 90
-TransactionPercentile = 60
-
-[HeadTracker]
-HistoryDepth = 400
-MaxBufferSize = 3
-SamplingInterval = '1s'
-
-[NodePool]
-PollFailureThreshold = 5
-PollInterval = '10s'
-SelectionMode = 'HighestHead'
-SyncThreshold = 10
 
 [OCR]
 ContractConfirmations = 1
@@ -3580,7 +3170,7 @@ BlockBackfillDepth = 10
 BlockBackfillSkip = false
 ChainType = 'optimismBedrock'
 FinalityDepth = 200
-FinalityTagEnabled = true
+FinalityTagEnabled = false
 LogBackfillBatchSize = 1000
 LogPollInterval = '2s'
 LogKeepBlocksDepth = 100000
@@ -3658,7 +3248,7 @@ BlockBackfillDepth = 10
 BlockBackfillSkip = false
 ChainType = 'arbitrum'
 FinalityDepth = 50
-FinalityTagEnabled = true
+FinalityTagEnabled = false
 LinkContractAddress = '0xf97f4df75117a78c1A5a0DBb814Af92458539FB4'
 LogBackfillBatchSize = 1000
 LogPollInterval = '1s'
@@ -3724,7 +3314,7 @@ ObservationGracePeriod = '1s'
 
 [OCR2]
 [OCR2.Automation]
-GasLimit = 14500000
+GasLimit = 5300000
 ```
 
 </p></details>
@@ -4041,84 +3631,6 @@ GasLimit = 5300000
 
 </p></details>
 
-<details><summary>Avalanche ANZ testnet (76578)</summary><p>
-
-```toml
-AutoCreateKey = true
-BlockBackfillDepth = 10
-BlockBackfillSkip = false
-FinalityDepth = 1
-FinalityTagEnabled = false
-LinkContractAddress = '0x779877A7B0D9E8603169DdbD7836e478b4624789'
-LogBackfillBatchSize = 1000
-LogPollInterval = '3s'
-LogKeepBlocksDepth = 100000
-MinIncomingConfirmations = 1
-MinContractPayment = '0.00001 link'
-NonceAutoSync = true
-NoNewHeadsThreshold = '0s'
-RPCDefaultBatchSize = 250
-RPCBlockQueryDelay = 2
-
-[Transactions]
-ForwardersEnabled = false
-MaxInFlight = 16
-MaxQueued = 250
-ReaperInterval = '1h0m0s'
-ReaperThreshold = '168h0m0s'
-ResendAfterThreshold = '1m0s'
-
-[BalanceMonitor]
-Enabled = true
-
-[GasEstimator]
-Mode = 'BlockHistory'
-PriceDefault = '25 gwei'
-PriceMax = '115792089237316195423570985008687907853269984665.640564039457584007913129639935 tether'
-PriceMin = '25 gwei'
-LimitDefault = 500000
-LimitMax = 500000
-LimitMultiplier = '1'
-LimitTransfer = 21000
-BumpMin = '5 gwei'
-BumpPercent = 20
-BumpThreshold = 3
-EIP1559DynamicFees = false
-FeeCapDefault = '100 gwei'
-TipCapDefault = '1 wei'
-TipCapMin = '1 wei'
-
-[GasEstimator.BlockHistory]
-BatchSize = 25
-BlockHistorySize = 24
-CheckInclusionBlocks = 12
-CheckInclusionPercentile = 90
-TransactionPercentile = 60
-
-[HeadTracker]
-HistoryDepth = 100
-MaxBufferSize = 3
-SamplingInterval = '1s'
-
-[NodePool]
-PollFailureThreshold = 5
-PollInterval = '10s'
-SelectionMode = 'HighestHead'
-SyncThreshold = 5
-
-[OCR]
-ContractConfirmations = 1
-ContractTransmitterTransmitTimeout = '10s'
-DatabaseTimeout = '10s'
-ObservationGracePeriod = '1s'
-
-[OCR2]
-[OCR2.Automation]
-GasLimit = 5300000
-```
-
-</p></details>
-
 <details><summary>Polygon Mumbai (80001)</summary><p>
 
 ```toml
@@ -4205,7 +3717,7 @@ BlockBackfillDepth = 10
 BlockBackfillSkip = false
 ChainType = 'optimismBedrock'
 FinalityDepth = 200
-FinalityTagEnabled = true
+FinalityTagEnabled = false
 LogBackfillBatchSize = 1000
 LogPollInterval = '2s'
 LogKeepBlocksDepth = 100000
@@ -4362,7 +3874,7 @@ BlockBackfillDepth = 10
 BlockBackfillSkip = false
 ChainType = 'arbitrum'
 FinalityDepth = 50
-FinalityTagEnabled = true
+FinalityTagEnabled = false
 LinkContractAddress = '0xd14838A68E8AFBAdE5efb411d5871ea0011AFd28'
 LogBackfillBatchSize = 1000
 LogPollInterval = '1s'
@@ -4428,160 +3940,6 @@ ObservationGracePeriod = '1s'
 
 [OCR2]
 [OCR2.Automation]
-GasLimit = 14500000
-```
-
-</p></details>
-
-<details><summary>Scroll Sepolia (534351)</summary><p>
-
-```toml
-AutoCreateKey = true
-BlockBackfillDepth = 10
-BlockBackfillSkip = false
-FinalityDepth = 1
-FinalityTagEnabled = false
-LogBackfillBatchSize = 1000
-LogPollInterval = '3s'
-LogKeepBlocksDepth = 100000
-MinIncomingConfirmations = 1
-MinContractPayment = '0.00001 link'
-NonceAutoSync = true
-NoNewHeadsThreshold = '0s'
-RPCDefaultBatchSize = 250
-RPCBlockQueryDelay = 1
-
-[Transactions]
-ForwardersEnabled = false
-MaxInFlight = 16
-MaxQueued = 250
-ReaperInterval = '1h0m0s'
-ReaperThreshold = '168h0m0s'
-ResendAfterThreshold = '1m0s'
-
-[BalanceMonitor]
-Enabled = true
-
-[GasEstimator]
-Mode = 'L2Suggested'
-PriceDefault = '20 gwei'
-PriceMax = '115792089237316195423570985008687907853269984665.640564039457584007913129639935 tether'
-PriceMin = '0'
-LimitDefault = 500000
-LimitMax = 500000
-LimitMultiplier = '1'
-LimitTransfer = 21000
-BumpMin = '5 gwei'
-BumpPercent = 20
-BumpThreshold = 0
-EIP1559DynamicFees = false
-FeeCapDefault = '100 gwei'
-TipCapDefault = '1 wei'
-TipCapMin = '1 wei'
-
-[GasEstimator.BlockHistory]
-BatchSize = 25
-BlockHistorySize = 0
-CheckInclusionBlocks = 12
-CheckInclusionPercentile = 90
-TransactionPercentile = 60
-
-[HeadTracker]
-HistoryDepth = 50
-MaxBufferSize = 3
-SamplingInterval = '1s'
-
-[NodePool]
-PollFailureThreshold = 5
-PollInterval = '10s'
-SelectionMode = 'HighestHead'
-SyncThreshold = 5
-
-[OCR]
-ContractConfirmations = 1
-ContractTransmitterTransmitTimeout = '10s'
-DatabaseTimeout = '10s'
-ObservationGracePeriod = '1s'
-
-[OCR2]
-[OCR2.Automation]
-GasLimit = 5300000
-```
-
-</p></details>
-
-<details><summary>Scroll Mainnet (534352)</summary><p>
-
-```toml
-AutoCreateKey = true
-BlockBackfillDepth = 10
-BlockBackfillSkip = false
-FinalityDepth = 1
-FinalityTagEnabled = false
-LogBackfillBatchSize = 1000
-LogPollInterval = '3s'
-LogKeepBlocksDepth = 100000
-MinIncomingConfirmations = 1
-MinContractPayment = '0.00001 link'
-NonceAutoSync = true
-NoNewHeadsThreshold = '0s'
-RPCDefaultBatchSize = 250
-RPCBlockQueryDelay = 1
-
-[Transactions]
-ForwardersEnabled = false
-MaxInFlight = 16
-MaxQueued = 250
-ReaperInterval = '1h0m0s'
-ReaperThreshold = '168h0m0s'
-ResendAfterThreshold = '1m0s'
-
-[BalanceMonitor]
-Enabled = true
-
-[GasEstimator]
-Mode = 'L2Suggested'
-PriceDefault = '20 gwei'
-PriceMax = '115792089237316195423570985008687907853269984665.640564039457584007913129639935 tether'
-PriceMin = '0'
-LimitDefault = 500000
-LimitMax = 500000
-LimitMultiplier = '1'
-LimitTransfer = 21000
-BumpMin = '5 gwei'
-BumpPercent = 20
-BumpThreshold = 0
-EIP1559DynamicFees = false
-FeeCapDefault = '100 gwei'
-TipCapDefault = '1 wei'
-TipCapMin = '1 wei'
-
-[GasEstimator.BlockHistory]
-BatchSize = 25
-BlockHistorySize = 0
-CheckInclusionBlocks = 12
-CheckInclusionPercentile = 90
-TransactionPercentile = 60
-
-[HeadTracker]
-HistoryDepth = 50
-MaxBufferSize = 3
-SamplingInterval = '1s'
-
-[NodePool]
-PollFailureThreshold = 5
-PollInterval = '10s'
-SelectionMode = 'HighestHead'
-SyncThreshold = 5
-
-[OCR]
-ContractConfirmations = 1
-ContractTransmitterTransmitTimeout = '10s'
-DatabaseTimeout = '10s'
-ObservationGracePeriod = '1s'
-
-[OCR2]
-[OCR2.Automation]
 GasLimit = 5300000
 ```
 
@@ -4594,7 +3952,7 @@ AutoCreateKey = true
 BlockBackfillDepth = 10
 BlockBackfillSkip = false
 FinalityDepth = 50
-FinalityTagEnabled = true
+FinalityTagEnabled = false
 LinkContractAddress = '0xb227f007804c16546Bd054dfED2E7A1fD5437678'
 LogBackfillBatchSize = 1000
 LogPollInterval = '15s'
@@ -4858,7 +4216,7 @@ BlockBackfillSkip enables skipping of very long backfills.
 ChainType = 'arbitrum' # Example
 ```
 ChainType is automatically detected from chain ID. Set this to force a certain chain type regardless of chain ID.
-Available types: arbitrum, metis, optimismBedrock, xdai, celo, kroma, wemix
+Available types: arbitrum, metis, optimismBedrock, xdai
 
 ### FinalityDepth
 ```toml
@@ -5559,12 +4917,11 @@ GasLimit controls the gas limit for transmit transactions from ocr2automation jo
 [[Cosmos]]
 ChainID = 'Malaga-420' # Example
 Enabled = true # Default
-Bech32Prefix = 'wasm' # Default
 BlockRate = '6s' # Default
 BlocksUntilTxTimeout = 30 # Default
 ConfirmPollPeriod = '1s' # Default
 FallbackGasPrice = '0.015' # Default
-GasToken = 'ucosm' # Default
+FCDURL = 'http://cosmos.com' # Example
 GasLimitMultiplier = '1.5' # Default
 MaxMsgsPerBatch = 100 # Default
 OCR2CachePollPeriod = '4s' # Default
@@ -5584,12 +4941,6 @@ ChainID is the Cosmos chain ID. Mandatory.
 Enabled = true # Default
 ```
 Enabled enables this chain.
-
-### Bech32Prefix
-```toml
-Bech32Prefix = 'wasm' # Default
-```
-Bech32Prefix is the human-readable prefix for addresses on this Cosmos chain. See https://docs.cosmos.network/v0.47/spec/addresses/bech32.
 
 ### BlockRate
 ```toml
@@ -5615,11 +4966,11 @@ FallbackGasPrice = '0.015' # Default
 ```
 FallbackGasPrice sets a fallback gas price to use when the estimator is not available.
 
-### GasToken
+### FCDURL
 ```toml
-GasToken = 'ucosm' # Default
+FCDURL = 'http://cosmos.com' # Example
 ```
-GasToken is the token denomination which is being used to pay gas fees on this chain.
+FCDURL sets the FCD (Full Client Daemon) URL.
 
 ### GasLimitMultiplier
 ```toml

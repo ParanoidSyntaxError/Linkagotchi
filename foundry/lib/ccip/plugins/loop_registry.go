@@ -31,7 +31,7 @@ type LoopRegistry struct {
 func NewLoopRegistry(lggr logger.Logger) *LoopRegistry {
 	return &LoopRegistry{
 		registry: map[string]*RegisteredLoop{},
-		lggr:     logger.Named(lggr, "LoopRegistry"),
+		lggr:     lggr,
 	}
 }
 
@@ -48,7 +48,7 @@ func (m *LoopRegistry) Register(id string) (*RegisteredLoop, error) {
 	envCfg := NewEnvConfig(nextPort)
 
 	m.registry[id] = &RegisteredLoop{Name: id, EnvCfg: envCfg}
-	m.lggr.Debugf("Registered loopp %q with config %v, port %d", id, envCfg, envCfg.PrometheusPort())
+	m.lggr.Debug("Registered loopp %q with config %v, port %d", id, envCfg, envCfg.PrometheusPort())
 	return m.registry[id], nil
 }
 

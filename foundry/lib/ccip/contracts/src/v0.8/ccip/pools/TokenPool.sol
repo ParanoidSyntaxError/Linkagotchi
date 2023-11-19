@@ -7,13 +7,12 @@ import {IARM} from "../interfaces/IARM.sol";
 import {OwnerIsCreator} from "../../shared/access/OwnerIsCreator.sol";
 import {RateLimiter} from "../libraries/RateLimiter.sol";
 
-import {IERC20} from "../../vendor/openzeppelin-solidity/v4.8.0/contracts/token/ERC20/IERC20.sol";
-import {IERC165} from "../../vendor/openzeppelin-solidity/v4.8.0/contracts/utils/introspection/IERC165.sol";
-import {EnumerableSet} from "../../vendor/openzeppelin-solidity/v4.8.0/contracts/utils/structs/EnumerableSet.sol";
+import {Pausable} from "../../vendor/Pausable.sol";
+import {IERC20} from "../../vendor/openzeppelin-solidity/v4.8.0/token/ERC20/IERC20.sol";
+import {IERC165} from "../../vendor/openzeppelin-solidity/v4.8.0/utils/introspection/IERC165.sol";
+import {EnumerableSet} from "../../vendor/openzeppelin-solidity/v4.8.0/utils/structs/EnumerableSet.sol";
 
 /// @notice Base abstract class with common functions for all token pools.
-/// A token pool serves as isolated place for holding tokens and token specific logic
-/// that may execute as tokens move across the bridge.
 abstract contract TokenPool is IPool, OwnerIsCreator, IERC165 {
   using EnumerableSet for EnumerableSet.AddressSet;
   using RateLimiter for RateLimiter.TokenBucket;
@@ -45,29 +44,20 @@ abstract contract TokenPool is IPool, OwnerIsCreator, IERC165 {
     RateLimiter.Config rateLimiterConfig;
   }
 
-  /// @dev The bridgeable token that is managed by this pool.
+  // The immutable token that belongs to this pool.
   IERC20 internal immutable i_token;
-  /// @dev The address of the arm proxy
   address internal immutable i_armProxy;
-  /// @dev The immutable flag that indicates if the pool is access-controlled.
+  // The immutable flag that indicates if the pool is access-controlled.
   bool internal immutable i_allowlistEnabled;
-  /// @dev A set of addresses allowed to trigger lockOrBurn as original senders.
-  /// Only takes effect if i_allowlistEnabled is true.
-  /// This can be used to ensure only token-issuer specified addresses can
-  /// move tokens.
+  // A set of addresses allowed to trigger lockOrBurn as original senders.
   EnumerableSet.AddressSet internal s_allowList;
 
-  /// @dev A set of allowed onRamps. We want the whitelist to be enumerable to
-  /// be able to quickly determine (without parsing logs) who can access the pool.
+  // A set of allowed onRamps. We want the whitelist to be enumerable to
+  // be able to quickly determine (without parsing logs) who can access the pool.
   EnumerableSet.AddressSet internal s_onRamps;
-  /// @dev Inbound rate limits. This allows per destination chain
-  /// token issuer specified rate limiting (e.g. issuers may trust chains to varying
-  /// degrees and prefer different limits)
   mapping(address => RateLimiter.TokenBucket) internal s_onRampRateLimits;
-  /// @dev A set of allowed offRamps.
+  // A set of allowed offRamps.
   EnumerableSet.AddressSet internal s_offRamps;
-  /// @dev Outbound rate limits. Corresponds to the inbound rate limit for the pool
-  /// on the remote chain.
   mapping(address => RateLimiter.TokenBucket) internal s_offRampRateLimits;
 
   constructor(IERC20 token, address[] memory allowlist, address armProxy) {
@@ -75,7 +65,7 @@ abstract contract TokenPool is IPool, OwnerIsCreator, IERC165 {
     i_token = token;
     i_armProxy = armProxy;
 
-    // Pool can be set as permissioned or permissionless at deployment time only to save hot-path gas.
+    // Pool can be set as permissioned or permissionless at deployment time only.
     i_allowlistEnabled = allowlist.length > 0;
     if (i_allowlistEnabled) {
       _applyAllowListUpdates(new address[](0), allowlist);
@@ -99,7 +89,7 @@ abstract contract TokenPool is IPool, OwnerIsCreator, IERC165 {
   }
 
   // ================================================================
-  // │                      Ramp permissions                        │
+  // |                      Ramp permissions                        |
   // ================================================================
 
   /// @notice Checks whether something is a permissioned onRamp on this contract.
@@ -115,7 +105,7 @@ abstract contract TokenPool is IPool, OwnerIsCreator, IERC165 {
   }
 
   /// @notice Get onRamp whitelist
-  /// @return list of onRamps.
+  /// @return list of onramps.
   function getOnRamps() public view returns (address[] memory) {
     return s_onRamps.values();
   }
@@ -189,7 +179,7 @@ abstract contract TokenPool is IPool, OwnerIsCreator, IERC165 {
   }
 
   // ================================================================
-  // │                        Rate limiting                         │
+  // |                        Rate limiting                         |
   // ================================================================
 
   /// @notice Consumes outbound rate limiting capacity in this pool
@@ -231,7 +221,7 @@ abstract contract TokenPool is IPool, OwnerIsCreator, IERC165 {
   }
 
   // ================================================================
-  // │                           Access                             │
+  // |                           Access                             |
   // ================================================================
 
   /// @notice Checks whether the msg.sender is a permissioned onRamp on this contract
@@ -249,7 +239,7 @@ abstract contract TokenPool is IPool, OwnerIsCreator, IERC165 {
   }
 
   // ================================================================
-  // │                          Allowlist                           │
+  // |                          Allowlist                           |
   // ================================================================
 
   modifier checkAllowList(address sender) {
@@ -298,7 +288,7 @@ abstract contract TokenPool is IPool, OwnerIsCreator, IERC165 {
     }
   }
 
-  /// @notice Ensure that there is no active curse.
+  /// @notice Ensure that the ARM has not emitted a bad signal, and that the latest heartbeat is not stale.
   modifier whenHealthy() {
     if (IARM(i_armProxy).isCursed()) revert BadARMSignal();
     _;
