@@ -6,13 +6,13 @@ import {Client} from "@ccip/ccip/libraries/Client.sol";
 import {CCIPReceiver, IAny2EVMMessageReceiver} from "@ccip/ccip/applications/CCIPReceiver.sol";
 
 import {IERC20} from "@openzeppelin/token/ERC20/IERC20.sol";
-import {ERC721Enumerable, IERC721Enumerable, ERC721} from "@openzeppelin/token/ERC721/extensions/ERC721Enumerable.sol";
+import {ERC721Enumerable, IERC721Enumerable, ERC721, IERC165} from "@openzeppelin/token/ERC721/extensions/ERC721Enumerable.sol";
 
-import {Linkagotchi} from "../Linkagotchi.sol";
+import {Linkie} from "../Linkie.sol";
 
-import {ILinkagotchiCCIP} from "./ILinkagotchiCCIP.sol";
+import {ILinkieCCIP} from "./ILinkieCCIP.sol";
 
-contract LinkagotchiCCIP is ILinkagotchiCCIP, CCIPReceiver, Linkagotchi {
+contract LinkieCCIP is ILinkieCCIP, CCIPReceiver, Linkie {
     struct TokenState {
         uint256 lifeCycle;
         uint256 species;
@@ -26,7 +26,7 @@ contract LinkagotchiCCIP is ILinkagotchiCCIP, CCIPReceiver, Linkagotchi {
         TokenState tokenState;
     }
     
-    mapping(uint64 => address) private _linkagotchiContracts;
+    mapping(uint64 => address) private _linkieContracts;
 
     bool public immutable isHomeChain;
 
@@ -38,7 +38,7 @@ contract LinkagotchiCCIP is ILinkagotchiCCIP, CCIPReceiver, Linkagotchi {
         address ccipRouter
     ) CCIPReceiver(
         ccipRouter
-    ) Linkagotchi(
+    ) Linkie(
         blockMulti,
         link,
         vrfWrapper
@@ -46,10 +46,11 @@ contract LinkagotchiCCIP is ILinkagotchiCCIP, CCIPReceiver, Linkagotchi {
         isHomeChain = isHome;
     }
 
-    function supportsInterface(bytes4 interfaceId) public pure virtual override (CCIPReceiver, ERC721Enumerable) returns (bool) {
+    function supportsInterface(bytes4 interfaceId) public pure virtual override (CCIPReceiver, ERC721Enumerable, IERC165) returns (bool) {
         return (
             interfaceId == type(IAny2EVMMessageReceiver).interfaceId || 
-            interfaceId == type(IERC721Enumerable).interfaceId
+            interfaceId == type(IERC721Enumerable).interfaceId ||
+            interfaceId == type(IERC165).interfaceId
         );
     }
 
@@ -59,12 +60,12 @@ contract LinkagotchiCCIP is ILinkagotchiCCIP, CCIPReceiver, Linkagotchi {
         return super.mint(receiver, vrfFee, callbackGasLimit);
     }
 
-    function getLinkagotchiContract(uint64 destinationChainSelector) external view returns (address) {
-        return _linkagotchiContracts[destinationChainSelector];
+    function getLinkieContract(uint64 destinationChainSelector) external view returns (address) {
+        return _linkieContracts[destinationChainSelector];
     }
 
-    function setLinkagotchiContract(uint64 destinationChainSelector, address linkagotchi) external onlyOwner() {
-        _linkagotchiContracts[destinationChainSelector] = linkagotchi;
+    function setLinkieContract(uint64 destinationChainSelector, address linkagotchi) external onlyOwner() {
+        _linkieContracts[destinationChainSelector] = linkagotchi;
     }
 
     function ccipTransfer(uint256 id, address receiver, uint64 destinationChainSelector, address feeToken, bytes memory extraArgs) external payable returns (bytes32) {
@@ -84,7 +85,7 @@ contract LinkagotchiCCIP is ILinkagotchiCCIP, CCIPReceiver, Linkagotchi {
         MessageData memory messageData = MessageData(id, receiver, tokenState);
 
         Client.EVM2AnyMessage memory ccipMessage = Client.EVM2AnyMessage(
-            abi.encode(_linkagotchiContracts[destinationChainSelector]),
+            abi.encode(_linkieContracts[destinationChainSelector]),
             abi.encode(messageData),
             new Client.EVMTokenAmount[](0),
             feeToken,
@@ -110,7 +111,7 @@ contract LinkagotchiCCIP is ILinkagotchiCCIP, CCIPReceiver, Linkagotchi {
     }
 
     function _ccipReceive(Client.Any2EVMMessage memory message) internal override {
-        require(abi.decode(message.sender, (address)) == _linkagotchiContracts[message.sourceChainSelector]);
+        require(abi.decode(message.sender, (address)) == _linkieContracts[message.sourceChainSelector]);
 
         MessageData memory messageData = abi.decode(message.data, (MessageData));
 

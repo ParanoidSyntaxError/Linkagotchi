@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.17;
 
-interface ILinkagotchi {
+import {IERC721Enumerable} from "@openzeppelin/token/ERC721/extensions/IERC721Enumerable.sol";
+
+interface ILinkie is IERC721Enumerable {
     function blockMultiplier() external view returns (uint256);
 
     function mintCost() external pure returns (uint256);

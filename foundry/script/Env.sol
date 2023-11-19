@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.17;
 
 import "forge-std/Test.sol";
 
-import "../src/Linkagotchi.sol";
+import "../src/Linkie.sol";
 
 contract Env is Test {
-    Linkagotchi public linkagotchi;
+    Linkie public linkie;
 
     function setUp() public {
-        linkagotchi = new Linkagotchi(2, address(0), address(0));
+        linkie = new Linkie(1000, address(0), address(0));
     }
 }

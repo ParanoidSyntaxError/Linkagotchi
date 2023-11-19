@@ -10,9 +10,9 @@ import {ERC721Enumerable, ERC721} from "@openzeppelin/token/ERC721/extensions/ER
 import {VRFV2WrapperConsumerBase} from "@chainlink/vrf/VRFV2WrapperConsumerBase.sol";
 import {VRFCoordinatorV2Interface} from "@chainlink/vrf/interfaces/VRFCoordinatorV2Interface.sol";
 
-import {ILinkagotchi} from "./ILinkagotchi.sol";
+import {ILinkie} from "./ILinkie.sol";
 
-contract Linkagotchi is ILinkagotchi, ERC721Enumerable, VRFV2WrapperConsumerBase, Ownable {
+contract Linkie is ILinkie, ERC721Enumerable, VRFV2WrapperConsumerBase, Ownable {
     struct TokenData {
         uint256 lifeCycle;
         uint256 lifeCycleBlockstamp;
@@ -57,8 +57,8 @@ contract Linkagotchi is ILinkagotchi, ERC721Enumerable, VRFV2WrapperConsumerBase
         address link,
         address vrfWrapper
     ) ERC721(
-        "Linkagotchi", 
-        "LINKAGOTCHI"
+        "Linkie", 
+        "LINKIE"
     ) VRFV2WrapperConsumerBase(
         link,
         vrfWrapper
@@ -91,7 +91,7 @@ contract Linkagotchi is ILinkagotchi, ERC721Enumerable, VRFV2WrapperConsumerBase
     }
 
     /**
-        @notice Get a Linkagotchi's stats
+        @notice Get a Linkies stats
     
         @param id Token ID
 
@@ -99,7 +99,7 @@ contract Linkagotchi is ILinkagotchi, ERC721Enumerable, VRFV2WrapperConsumerBase
         @return species Species ID
         @return hunger Hunger level
         @return sickness Sickness level
-        @return alive Is the Linkagotchi alive
+        @return alive Is the Linkie alive
     */
     function stats(uint256 id) external view override returns (uint256, uint256, uint256, uint256, bool) {
         return (_lifeCycle(id), _species(id), _hunger(id), _sickness(id), _isAlive(id));
@@ -131,7 +131,7 @@ contract Linkagotchi is ILinkagotchi, ERC721Enumerable, VRFV2WrapperConsumerBase
     }
 
     /**
-        @notice Feed a Linkagotchi
+        @notice Feed a Linkie
     
         @param id Token ID
         @param amount Amount hunger is decreased by
@@ -146,7 +146,7 @@ contract Linkagotchi is ILinkagotchi, ERC721Enumerable, VRFV2WrapperConsumerBase
     }
 
     /**
-        @notice Cure a Linkagotchi
+        @notice Cure a Linkie
     
         @param id Token ID
         @param amount Amount sickness is decreased by
@@ -168,9 +168,9 @@ contract Linkagotchi is ILinkagotchi, ERC721Enumerable, VRFV2WrapperConsumerBase
         return string(abi.encodePacked(
             'data:application/json;base64,',
             Base64.encode(abi.encodePacked(
-                '{"name":"Linkagotchi #',
+                '{"name":"Linkie #',
                 Strings.toString(id),
-                '","description":"Take care of your Linkagotchi anon!","image":"data:image/svg+xml;base64,',
+                '","description":"Take care of your Linkie anon!","image":"data:image/svg+xml;base64,',
                 Base64.encode(bytes(_tokenSvg(_tokenSvgHash(id)))),
                 '","attributes":',
                 _tokenAttributes(id),
@@ -301,7 +301,7 @@ contract Linkagotchi is ILinkagotchi, ERC721Enumerable, VRFV2WrapperConsumerBase
         }
 
         return string(abi.encodePacked(
-            "<svg id='linkagotchi-svg' xmlns='http://www.w3.org/2000/svg' preserveAspectRatio='xMinYMin meet' viewBox='0 0 16 16'><style>#linkagotchi-svg{shape-rendering: crispedges;}.w0{fill:#000000}.w1{fill:#FFFFFF}.w2{fill:#FF0000}.w3{fill:#00FF00}.w4{fill:#0000FF}.w5{fill:#00FFFF}.w6{fill:#FFFF00}.w7{fill:#FF00FF}</style>", 
+            "<svg id='linkie-svg' xmlns='http://www.w3.org/2000/svg' preserveAspectRatio='xMinYMin meet' viewBox='0 0 16 16'><style>#linkie-svg{shape-rendering: crispedges;}.w0{fill:#000000}.w1{fill:#FFFFFF}.w2{fill:#FF0000}.w3{fill:#00FF00}.w4{fill:#0000FF}.w5{fill:#00FFFF}.w6{fill:#FFFF00}.w7{fill:#FF00FF}</style>", 
             "<rect class='w0' x='0' y='0' width='16' height='16'/>",
             rects,
             "</svg>"
