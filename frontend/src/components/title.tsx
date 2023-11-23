@@ -5,11 +5,12 @@ import { Property } from 'csstype'
 
 function Title(align: Property.TextAlign, margin: string, width: string, maxWidth: string) {
     const rootStyle: CSSProperties = {
-        width: "100vw",
-        height: "100vh",
+        width: "95vw",
+        height: "95vh",
         overflow: "hidden",
         position: "absolute",
         textAlign: align,
+        pointerEvents: "none"
     };
 
     const imgStyle: CSSProperties = {

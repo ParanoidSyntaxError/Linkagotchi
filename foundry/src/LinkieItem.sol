@@ -5,7 +5,7 @@ import {Ownable} from "@openzeppelin/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/token/ERC20/IERC20.sol";
 import {ERC1155Supply, ERC1155} from "@openzeppelin/token/ERC1155/extensions/ERC1155Supply.sol";
 
-import {ILinkie} from "../ILinkie.sol";
+import {ILinkie} from "./ILinkie.sol";
 import {ILinkieItem} from "./ILinkieItem.sol";
 
 contract LinkieItem is ILinkieItem, ERC1155Supply, Ownable {   
@@ -70,6 +70,10 @@ contract LinkieItem is ILinkieItem, ERC1155Supply, Ownable {
         }
 
         revert();
+    }
+
+    function setURI(string memory uri) external override onlyOwner() {
+        _setURI(uri);
     }
 
     function newFood(uint256 amount, uint256 price, uint256 maxMinted) external override onlyOwner() returns (uint256 id) {

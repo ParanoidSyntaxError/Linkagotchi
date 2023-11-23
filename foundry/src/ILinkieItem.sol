@@ -13,6 +13,8 @@ interface ILinkieItem {
     function mint(uint256 id, uint256 amount, address receiver) external;
     function use(uint256 id, uint256 amount, uint256 linkieId) external;
 
+    function setURI(string memory uri) external;
+
     function newFood(uint256 amount, uint256 price, uint256 maxSupply) external returns (uint256 id);
     function newMedicine(uint256 amount, uint256 price, uint256 maxSupply) external returns (uint256 id);
     function newCollectable(uint256 price, uint256 maxSupply) external returns (uint256 id);
