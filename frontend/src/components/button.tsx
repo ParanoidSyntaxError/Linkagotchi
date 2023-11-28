@@ -2,7 +2,7 @@ import React, {CSSProperties} from 'react';
 import { styled } from '@mui/material/styles';
 import MuiButton, { ButtonProps as MuiButtonProps } from '@mui/material/Button';
 
-function Button(text: string, fontSize: string, width: string, bgColor: string, bgColorHover: string) {  
+function Button(text: string, fontSize: string, width: string, bgColor: string, bgColorHover: string, onClick: any | undefined = undefined) {  
     const rootStyle: CSSProperties = {
     };
 
@@ -24,7 +24,7 @@ function Button(text: string, fontSize: string, width: string, bgColor: string, 
 
     return (
         <div style={rootStyle}>
-            <StyledButton>
+            <StyledButton onClick={onClick}>
                 {text}
             </StyledButton>
         </div>

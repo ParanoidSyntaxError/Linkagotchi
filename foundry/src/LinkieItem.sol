@@ -54,6 +54,8 @@ contract LinkieItem is ILinkieItem, ERC1155Supply, Ownable {
         _tokenData[id].totalMinted++;
 
         _mint(receiver, id, amount, "");
+
+        emit Mint(id, amount, receiver);
     }
 
     function use(uint256 id, uint256 amount, uint256 linkieId) external override {
@@ -63,9 +65,15 @@ contract LinkieItem is ILinkieItem, ERC1155Supply, Ownable {
 
         if(_tokenData[id].itemType == ItemType.Food) {
             ILinkie(linkie).feed(linkieId, _tokenData[id].amount);
+            
+            emit Use(id, amount, linkieId);
+            
             return;
         } else if(_tokenData[id].itemType == ItemType.Medicine) {
             ILinkie(linkie).heal(linkieId, _tokenData[id].amount);
+
+            emit Use(id, amount, linkieId);
+            
             return;
         }
 

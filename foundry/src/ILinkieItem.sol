@@ -8,6 +8,9 @@ interface ILinkieItem {
         Collectable
     }
 
+    event Mint(uint256 indexed id, uint256 amount, address indexed receiver);
+    event Use(uint256 indexed id, uint256 amount, uint256 indexed linkieId);
+
     function item(uint256 id) external view returns (ItemType itemType, uint256 amount, uint256 price, uint256 maxMinted, uint256 totalMinted);
 
     function mint(uint256 id, uint256 amount, address receiver) external;
