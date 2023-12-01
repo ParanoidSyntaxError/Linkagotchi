@@ -34,12 +34,12 @@ function ItemList() {
 
     return (
         <div style={rootStyle}>
-            <Grid container padding={2} gap={2} sx={{
+            <Grid container padding="1rem" gap="1rem" sx={{
                 width: "100%",
                 height: "100%",
                 overflowY: "scroll",
-                justifyContent: "left",
-                alignItems: "left",
+                justifyContent: "center",
+                alignItems: "center",
             }}>
                 {[...Array(17)].map(() => (
                     <Grid sx={{
