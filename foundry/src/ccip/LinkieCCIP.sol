@@ -34,14 +34,14 @@ contract LinkieCCIP is ILinkieCCIP, CCIPReceiver, Linkie {
         bool isHome,
         uint256 blockMulti,
         address link,
-        address vrfWrapper,
+        address vrf,
         address ccipRouter
     ) CCIPReceiver(
         ccipRouter
     ) Linkie(
         blockMulti,
         link,
-        vrfWrapper
+        vrf
     ) {
         isHomeChain = isHome;
     }
@@ -54,10 +54,10 @@ contract LinkieCCIP is ILinkieCCIP, CCIPReceiver, Linkie {
         );
     }
 
-    function mint(address receiver, uint256 vrfFee, uint32 callbackGasLimit) public virtual override returns (uint256 requestId, uint256 id) {      
+    function mint(address receiver, uint256 vrfFee, bytes32 keyHash, uint32 callbackGasLimit) public virtual override returns (uint256 requestId, uint256 id) {      
         require(isHomeChain);
 
-        return super.mint(receiver, vrfFee, callbackGasLimit);
+        return super.mint(receiver, vrfFee, keyHash, callbackGasLimit);
     }
 
     function getLinkieContract(uint64 destinationChainSelector) external view returns (address) {

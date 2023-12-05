@@ -2,7 +2,7 @@ import React, {CSSProperties} from 'react';
 import { styled } from '@mui/material/styles';
 import MuiButton, { ButtonProps as MuiButtonProps } from '@mui/material/Button';
 
-function Button(text: string, fontSize: string, width: string, bgColor: string, bgColorHover: string, onClick: any = undefined) {  
+export default function Button(text: string, fontSize: string, width: string, bgColor: string, bgColorHover: string, onClick: any = undefined) {  
     const rootStyle: CSSProperties = {
     };
 
@@ -30,5 +30,3 @@ function Button(text: string, fontSize: string, width: string, bgColor: string, 
         </div>
     );
 }
-
-export default Button;

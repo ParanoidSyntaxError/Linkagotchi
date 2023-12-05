@@ -12,6 +12,7 @@ interface ILinkieItem {
     event Use(uint256 indexed id, uint256 amount, uint256 indexed linkieId);
 
     function item(uint256 id) external view returns (ItemType itemType, uint256 amount, uint256 price, uint256 maxMinted, uint256 totalMinted);
+    function totalIds() external view returns (uint256 total);
 
     function mint(uint256 id, uint256 amount, address receiver) external;
     function use(uint256 id, uint256 amount, uint256 linkieId) external;

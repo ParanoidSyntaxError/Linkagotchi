@@ -3,27 +3,48 @@ import { Stack } from '@mui/material';
 import Grid from '@mui/material/Unstable_Grid2';
 import Button from "../components/button";
 import LinkieList from '../components/linkie-list';
-import ItemList from '../components/item-list';
 import LinkiePortrait from '../components/linkie-portrait';
+import ConnectButton from '../components/connect-button';
+import { useAccount, useContractWrite } from 'wagmi';
+import MintButton from './mint-button';
 
-function GameView() {  
+export default function GameView() {  
     const rootStyle: CSSProperties = {
         marginBottom: "4rem"
     };
 
-    const navigationStyle: CSSProperties = {
+    const gameButtonsStyle: CSSProperties = {
     };
 
     const gridStyle: CSSProperties = {
         marginTop: "1rem"
     };
 
+    const connectStyle: CSSProperties = {
+        display: "flex",
+        justifyContent: "center",
+        alignItems: "center",
+        marginTop: "8rem",
+        marginBottom: "4rem"
+    };
+
+    const { isConnected } = useAccount()
+
+    if(isConnected == false) {
+        return (
+            <div style={connectStyle}>
+                <ConnectButton/>
+            </div>
+        );
+    }
+
     return (
         <div style={rootStyle}>
-            <div style={navigationStyle}>
+            <div style={gameButtonsStyle}>
                 <Stack direction="row" justifyContent="center" spacing={8}>
-                    {Button("Linkie", "1rem", "5rem", "deeppink", "aqua")}
-                    {Button("Shop", "1rem", "5rem", "deeppink", "aqua")}
+                    {MintButton("MINT", "1rem", "5rem", "deeppink", "aqua")}
+                    {Button("FEED", "1rem", "5rem", "deeppink", "aqua")}
+                    {Button("HEAL", "1rem", "5rem", "deeppink", "aqua")}
                 </Stack>
             </div>
             <div style={gridStyle}>
@@ -34,18 +55,13 @@ function GameView() {
                     maxWidth: "90vw",
                 }}>
                     <div>
-                        {LinkieList()}
+                        <LinkieList/>
                     </div>
                     <div>
-                        {LinkiePortrait()}
-                    </div>
-                    <div>
-                        {ItemList()}
+                        <LinkiePortrait/>
                     </div>
                 </Grid>
             </div>
         </div>
     );
 }
-
-export default GameView;

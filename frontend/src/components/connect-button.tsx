@@ -2,7 +2,7 @@ import React, {CSSProperties} from 'react';
 import Button from "../components/button";
 import { useWeb3Modal } from '@web3modal/wagmi/react'
 
-function ConnectButton() {  
+export default function ConnectButton() {  
     const rootStyle: CSSProperties = {
     };
 
@@ -10,9 +10,7 @@ function ConnectButton() {
 
     return (
         <div style={rootStyle}>
-            {Button("Connect wallet", "1.5rem", "fit-content", "deeppink", "aqua", open)}
+            {Button("Connect wallet", "1.5rem", "fit-content", "deeppink", "aqua", open)}            
         </div>
     );
 }
-
-export default ConnectButton;

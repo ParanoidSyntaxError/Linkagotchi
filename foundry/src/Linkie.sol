@@ -7,12 +7,13 @@ import {Ownable} from "@openzeppelin/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/token/ERC20/IERC20.sol";
 import {ERC721Enumerable, ERC721} from "@openzeppelin/token/ERC721/extensions/ERC721Enumerable.sol";
 
-import {VRFV2WrapperConsumerBase} from "@chainlink/vrf/VRFV2WrapperConsumerBase.sol";
+import {VRFConsumerBaseV2} from "@chainlink/vrf/VRFConsumerBaseV2.sol";
 import {VRFCoordinatorV2Interface} from "@chainlink/vrf/interfaces/VRFCoordinatorV2Interface.sol";
+import {LinkTokenInterface} from "@chainlink/shared/interfaces/LinkTokenInterface.sol";
 
 import {ILinkie} from "./ILinkie.sol";
 
-contract Linkie is ILinkie, ERC721Enumerable, VRFV2WrapperConsumerBase, Ownable {
+contract Linkie is ILinkie, ERC721Enumerable, VRFConsumerBaseV2, Ownable {
     struct TokenData {
         uint256 lifeCycle;
         uint256 lifeCycleBlockstamp;
@@ -26,6 +27,9 @@ contract Linkie is ILinkie, ERC721Enumerable, VRFV2WrapperConsumerBase, Ownable 
     }
 
     address public immutable linkToken;
+
+    address public immutable vrfCoordinator;
+    uint64 public immutable subscriptionId;
 
     // VRF request ID => Token ID
     mapping(uint256 => uint256) private _vrfTokenIds;
@@ -55,13 +59,12 @@ contract Linkie is ILinkie, ERC721Enumerable, VRFV2WrapperConsumerBase, Ownable 
     constructor(
         uint256 blockMulti,
         address link,
-        address vrfWrapper
+        address vrf
     ) ERC721(
         "Linkie", 
         "LINKIE"
-    ) VRFV2WrapperConsumerBase(
-        link,
-        vrfWrapper
+    ) VRFConsumerBaseV2(
+        vrf
     ) {
         _blockMultiplier = blockMulti;
         _sicknessRate *= blockMulti;
@@ -70,8 +73,15 @@ contract Linkie is ILinkie, ERC721Enumerable, VRFV2WrapperConsumerBase, Ownable 
         linkToken = link;
 
         _speciesLengths = [
-            5
+            1, // Baby
+            2, // Child
+            2, // Teen
+            2  // Adult
         ];
+
+        vrfCoordinator = vrf;
+        subscriptionId = VRFCoordinatorV2Interface(vrfCoordinator).createSubscription();
+        VRFCoordinatorV2Interface(vrfCoordinator).addConsumer(subscriptionId, address(this));
     }
 
     function blockMultiplier() external view override returns (uint256) {
@@ -115,19 +125,29 @@ contract Linkie is ILinkie, ERC721Enumerable, VRFV2WrapperConsumerBase, Ownable 
         @return requestId ID of the VRF request
         @return id ID of the minted token
     */
-    function mint(address receiver, uint256 vrfFee, uint32 callbackGasLimit) public virtual override returns (uint256 requestId, uint256 id) {      
+    function mint(address receiver, uint256 vrfFee, bytes32 keyHash, uint32 callbackGasLimit) public virtual override returns (uint256 requestId, uint256 id) {      
         IERC20(linkToken).transferFrom(msg.sender, address(this), _MINT_COST + vrfFee);
         
         id = totalSupply();
 
-        requestId = requestRandomness(
-            callbackGasLimit,
-            3,
+        LinkTokenInterface(linkToken).transferAndCall(vrfCoordinator, vrfFee, abi.encode(subscriptionId));
+        requestId = VRFCoordinatorV2Interface(vrfCoordinator).requestRandomWords(
+            keyHash, 
+            subscriptionId, 
+            5, 
+            callbackGasLimit, 
             1
         );
         _vrfTokenIds[requestId] = id;
 
         _safeMint(receiver, id);
+    }
+
+    /**
+        @dev See {VRFConsumerBaseV2-fulfillRandomWords}.
+    */
+    function fulfillRandomWords(uint256 requestId, uint256[] memory randomWords) internal override {
+        _newToken(_vrfTokenIds[requestId], randomWords[0]);
     }
 
     /**
@@ -143,6 +163,8 @@ contract Linkie is ILinkie, ERC721Enumerable, VRFV2WrapperConsumerBase, Ownable 
         IERC20(linkToken).transferFrom(msg.sender, address(this), amount * _FEED_COST);
 
         _feed(id, amount);
+
+        _checkGrowth(id);
     }
 
     /**
@@ -157,6 +179,8 @@ contract Linkie is ILinkie, ERC721Enumerable, VRFV2WrapperConsumerBase, Ownable 
         IERC20(linkToken).transferFrom(msg.sender, address(this), amount * _HEAL_COST);
 
         _heal(id, amount);
+
+        _checkGrowth(id);
     }
 
     /**
@@ -242,13 +266,6 @@ contract Linkie is ILinkie, ERC721Enumerable, VRFV2WrapperConsumerBase, Ownable 
         return true;
     }
 
-    /**
-        @dev See {VRFConsumerBaseV2-fulfillRandomWords}.
-    */
-    function fulfillRandomWords(uint256 requestId, uint256[] memory randomWords) internal override {
-        _newToken(_vrfTokenIds[requestId], randomWords[0]);
-    }
-
     function _newToken(uint256 id, uint256 random) internal {
         _tokens[id].lifeCycleBlockstamp = block.number;
         _tokens[id].species = _randomSpecies(0, random);
@@ -260,9 +277,11 @@ contract Linkie is ILinkie, ERC721Enumerable, VRFV2WrapperConsumerBase, Ownable 
         _tokens[id] = tokenData;
     }
 
-    function _grow(uint256 id, uint256 random) internal {
-        _tokens[id].lifeCycle++;
-        _tokens[id].species = _randomSpecies(_tokens[id].lifeCycle, random);
+    function _checkGrowth(uint256 id) internal {
+        if(_lifeCycle(id) > _tokens[id].lifeCycle) {
+            _tokens[id].lifeCycle++;
+            _tokens[id].species = _species(id);
+        }
     }
 
     function _feed(uint256 id, uint256 amount) internal {
@@ -302,7 +321,6 @@ contract Linkie is ILinkie, ERC721Enumerable, VRFV2WrapperConsumerBase, Ownable 
 
         return string(abi.encodePacked(
             "<svg id='linkie-svg' xmlns='http://www.w3.org/2000/svg' preserveAspectRatio='xMinYMin meet' viewBox='0 0 16 16'><style>#linkie-svg{shape-rendering: crispedges;}.w0{fill:#000000}.w1{fill:#FFFFFF}.w2{fill:#FF0000}.w3{fill:#00FF00}.w4{fill:#0000FF}.w5{fill:#00FFFF}.w6{fill:#FFFF00}.w7{fill:#FF00FF}</style>", 
-            "<rect class='w0' x='0' y='0' width='16' height='16'/>",
             rects,
             "</svg>"
         ));
@@ -313,32 +331,27 @@ contract Linkie is ILinkie, ERC721Enumerable, VRFV2WrapperConsumerBase, Ownable 
             return hex"00";
         }
 
-        if(_tokens[id].lifeCycle == 0) {
+        if(_tokens[id].lifeCycle == 0) { // Baby
             if(_tokens[id].species == 0) {
-                return hex"00015612016446017321017A21006611008512007911";
+                return hex"00D61500C71200A53100AB3100A71100A911009611008711007811008911009A11";
             }
-            if(_tokens[id].species == 1) {
-                return hex"00015712016614017546018B21018421006711007911009612";
-            }
-            if(_tokens[id].species == 2) {
-                return hex"0001561301651501743701A515007611007911009612";
-            }
-            if(_tokens[id].species == 3) {
-                return hex"00015811016713017645018B21018521007911008611009812";
-            }
-            if(_tokens[id].species == 4) {
-                return hex"0001671301764501B713018B2101852100771100891100A712";
-            }
-        } else if(_tokens[id].species == 1) {
+        } else if(_tokens[id].species == 1) { // Child
             if(_tokens[id].species == 0) {
+                return hex"00D51600A43100AB3100C81200B61100A811009512009912008712";
+            } else if(_tokens[id].species == 1) {
+                return hex"00D61400C51100CA1100B71200A61100981100A42100AB21009511008611007712008911009A11";
             }
-            if(_tokens[id].species == 1) {
+        } else if(_tokens[id].species == 1) { // Teen
+            if(_tokens[id].species == 0) {
+                return hex"00C51600D61100D911008441008B41009C1100931100A612008611009911007516";
+            } else if(_tokens[id].species == 1) {
+                return hex"00C61500A81200D61100DA11008711007911007551006615007B51009C11009411";
             }
-            if(_tokens[id].species == 2) {
-            }
-            if(_tokens[id].species == 3) {
-            }
-            if(_tokens[id].species == 4) {
+        } else if(_tokens[id].species == 1) { // Adult
+            if(_tokens[id].species == 0) {
+                return hex"00C51600D61100D91100943100A311009B3100AC11008511007614008A1100961100881100A712";
+            } else if(_tokens[id].species == 1) {
+                return hex"00C51600D61100D911008441008B4100751200871200791200991100A61100B81200AC1100A311";
             }
         }
 

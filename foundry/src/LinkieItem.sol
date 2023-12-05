@@ -36,6 +36,10 @@ contract LinkieItem is ILinkieItem, ERC1155Supply, Ownable {
         return (_tokenData[id].itemType, _tokenData[id].amount, _tokenData[id].price, _tokenData[id].maxMinted, _tokenData[id].totalMinted);
     }
 
+    function totalIds() external view override returns (uint256) {
+        return _totalIds;
+    }
+
     function mint(uint256 id, uint256 amount, address receiver) external override {
         require(id < _totalIds);
         require(_tokenData[id].totalMinted <= _tokenData[id].maxMinted);

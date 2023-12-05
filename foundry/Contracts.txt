@@ -1,0 +1,6 @@
+POLYGON MUMBAI
+Home chain: True
+Blocks per second: 2
+Chain multi: 5000
+LinkieCCIP: 0xDBfbbEbfE04190487a40f227f23c4c012AEF349a
+LinkieHelper: 0xC128D4261c70e8E5d52F45697698468C200Ab538
