@@ -1,0 +1,10 @@
+type Owner @entity {
+  id: Bytes!
+  balance: BigInt!
+}
+
+type Token @entity {
+  id: Bytes!
+  tokenId: BigInt!
+  owner: Bytes!
+}

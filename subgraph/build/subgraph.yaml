@@ -1,0 +1,25 @@
+specVersion: 0.0.5
+schema:
+  file: schema.graphql
+dataSources:
+  - kind: ethereum
+    name: LinkieCCIP
+    network: mumbai
+    source:
+      address: "0xDBfbbEbfE04190487a40f227f23c4c012AEF349a"
+      abi: LinkieCCIP
+      startBlock: 43208315
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.7
+      language: wasm/assemblyscript
+      entities:
+        - Owner
+        - Token
+      abis:
+        - name: LinkieCCIP
+          file: LinkieCCIP/abis/LinkieCCIP.json
+      eventHandlers:
+        - event: Transfer(indexed address,indexed address,indexed uint256)
+          handler: handleTransfer
+      file: LinkieCCIP/LinkieCCIP.wasm
