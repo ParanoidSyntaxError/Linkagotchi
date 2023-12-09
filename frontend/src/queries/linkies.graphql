@@ -1,0 +1,5 @@
+query OwnedTokens($owner: Bytes!) {
+    tokens(where: {owner: $owner}) {
+        tokenId
+    }
+}

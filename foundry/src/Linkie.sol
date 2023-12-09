@@ -158,6 +158,7 @@ contract Linkie is ILinkie, ERC721Enumerable, VRFConsumerBaseV2, Ownable {
     */
     function feed(uint256 id, uint256 amount) external override {
         _requireMinted(id);
+        require(_isAlive(id));
         require(_sickness(id) == 0);
 
         IERC20(linkToken).transferFrom(msg.sender, address(this), amount * _FEED_COST);
@@ -175,6 +176,7 @@ contract Linkie is ILinkie, ERC721Enumerable, VRFConsumerBaseV2, Ownable {
     */
     function heal(uint256 id, uint256 amount) external override {
         _requireMinted(id);
+        require(_isAlive(id));
 
         IERC20(linkToken).transferFrom(msg.sender, address(this), amount * _HEAL_COST);
 
@@ -286,10 +288,12 @@ contract Linkie is ILinkie, ERC721Enumerable, VRFConsumerBaseV2, Ownable {
 
     function _feed(uint256 id, uint256 amount) internal {
         _tokens[id].hunger = _safeSubtraction(_tokens[id].hunger, amount);
+        _tokens[id].hungerTimestamp = block.timestamp;
     }
 
     function _heal(uint256 id, uint256 amount) internal {
         _tokens[id].sickness = _safeSubtraction(_tokens[id].sickness, amount);
+        _tokens[id].sicknessBlockstamp = block.number;
     }
 
     function _tokenSvg(bytes memory svgHash) internal pure returns (string memory) {
