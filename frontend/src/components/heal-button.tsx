@@ -55,7 +55,7 @@ export default function HealButton(text: string, fontSize: string, width: string
         address: "0x326C977E6efc84E512bB9C30f76E30c160eD06FB",
         abi: transferAndCallAbi,
         args: [
-            "0xC128D4261c70e8E5d52F45697698468C200Ab538", 
+            "0x1993aD4D968664b96c613173C785ba860c1100dB", 
             101,
             encodedArgs
         ],

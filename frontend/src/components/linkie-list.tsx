@@ -38,7 +38,7 @@ function QueryLinkieStats(tokenIds: BigInt[]) {
     let contractReads: any = [];
     for(let i = 0; i < tokenIds.length; i++) {
         contractReads.push({
-            address: "0xDBfbbEbfE04190487a40f227f23c4c012AEF349a",
+            address: "0xbD4d23c124B697C2494F4546f356453D907A4056",
             abi: [{
                 "inputs": [
                     {
@@ -154,10 +154,10 @@ export default function LinkieList() {
     }
 
     const cards = () => {
-        if(linkieStats != undefined) {
+        if(linkieStats != undefined && ownedLinkieIds != undefined && linkieStats.length > 0) {
             return (
                 ownedLinkieIds?.map((tokenId: BigInt, index: number) => (
-                    <div style={cardStyle(tokenId)} onClick={() => (setSelectedLinkie(linkieStats[index]))}>
+                    <div style={cardStyle(tokenId)} onClick={() => (setSelectedLinkie(linkieStats[index]))} key={index}>
                         <img src={linkieStats[index].lifeCycle + "_" + linkieStats[index].species + ".png"} style={imgStyle}></img>
                         <div style={textStyle}>
                             Linkie #{tokenId.toString()}

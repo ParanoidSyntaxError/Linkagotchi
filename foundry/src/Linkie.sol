@@ -84,6 +84,30 @@ contract Linkie is ILinkie, ERC721Enumerable, VRFConsumerBaseV2, Ownable {
         VRFCoordinatorV2Interface(vrfCoordinator).addConsumer(subscriptionId, address(this));
     }
 
+    /**
+        @notice DEBUG FUNCTION. NOT FOR PRODUCTION
+    */
+    function setToken(
+        uint256 id,
+        uint256 lifeCycle, 
+        uint256 lifeCycleBlockstamp, 
+        uint256 species, 
+        uint256 hunger, 
+        uint256 hungerTimestamp, 
+        uint256 sickness, 
+        uint256 sicknessBlockstamp
+    ) external onlyOwner() {
+        _tokens[id] = TokenData(
+            lifeCycle, 
+            lifeCycleBlockstamp, 
+            species, 
+            hunger, 
+            hungerTimestamp,
+            sickness,
+            sicknessBlockstamp
+        );
+    }
+
     function blockMultiplier() external view override returns (uint256) {
         return _blockMultiplier;
     }
@@ -287,12 +311,12 @@ contract Linkie is ILinkie, ERC721Enumerable, VRFConsumerBaseV2, Ownable {
     }
 
     function _feed(uint256 id, uint256 amount) internal {
-        _tokens[id].hunger = _safeSubtraction(_tokens[id].hunger, amount);
+        _tokens[id].hunger = _safeSubtraction(_hunger(id), amount);
         _tokens[id].hungerTimestamp = block.timestamp;
     }
 
     function _heal(uint256 id, uint256 amount) internal {
-        _tokens[id].sickness = _safeSubtraction(_tokens[id].sickness, amount);
+        _tokens[id].sickness = _safeSubtraction(_sickness(id), amount);
         _tokens[id].sicknessBlockstamp = block.number;
     }
 
