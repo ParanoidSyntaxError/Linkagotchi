@@ -1,4 +1,4 @@
-import { Address, BigInt, Bytes } from "@graphprotocol/graph-ts"
+import { Address, BigInt, Bytes, dataSource } from "@graphprotocol/graph-ts"
 import { Transfer as TransferEvent } from "../generated/LinkieCCIP/LinkieCCIP"
 import { Token, Owner } from "../generated/schema"
 
@@ -11,6 +11,9 @@ export function handleTransfer(event: TransferEvent): void {
     token.tokenId = event.params.tokenId;
   }
   token.owner = event.params.to;
+  if(event.params.from == Address.zero()) {
+    token.network = dataSource.network();
+  }
   
   let newOwner = Owner.load(event.params.to);
   if(newOwner == null) {

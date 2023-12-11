@@ -7,10 +7,16 @@ import axios from "axios";
 import { useQuery } from "react-query";
 import LinkieStats from '../interfaces/linkie-stats';
 
-function QueryOwnedLinkieIds(address: string | undefined) {
+interface SubgraphToken {
+    tokenId: bigint,
+    network: string
+}
+
+function QueryOwnedTokens(address: string | undefined) {
     const query = `{
         tokens(where: {owner: "` + address + `"}) {
-            tokenId
+            tokenId,
+            network
         }
     }`;
     
@@ -26,17 +32,17 @@ function QueryOwnedLinkieIds(address: string | undefined) {
         return response.data.data;
     });
 
-    let tokenIds: BigInt[] = [];
+    let tokens: SubgraphToken[] = [];
     for(let i = 0; i < data?.tokens.length; i++) {
-        tokenIds.push(data?.tokens[i].tokenId);
+        tokens.push({tokenId: data?.tokens[i].tokenId, network: data?.tokens[i].network});
     }
 
-    return tokenIds;
+    return tokens;
 }
 
-function QueryLinkieStats(tokenIds: BigInt[]) {
+function QueryLinkieStats(tokens: SubgraphToken[]) {
     let contractReads: any = [];
-    for(let i = 0; i < tokenIds.length; i++) {
+    for(let i = 0; i < tokens.length; i++) {
         contractReads.push({
             address: "0xbD4d23c124B697C2494F4546f356453D907A4056",
             abi: [{
@@ -79,7 +85,7 @@ function QueryLinkieStats(tokenIds: BigInt[]) {
                 "type": "function"
             }],
             functionName: "stats",
-            args: [tokenIds[i]]
+            args: [tokens[i].tokenId]
         });
     }
 
@@ -90,12 +96,13 @@ function QueryLinkieStats(tokenIds: BigInt[]) {
         for(let i = 0; i < data.length; i++) {
             const results = data[i].result as any[];
             stats.push({
-                tokenId: tokenIds[i] as bigint,
+                tokenId: tokens[i].tokenId as bigint,
                 lifeCycle: results[0] as bigint,  
                 species: results[1] as bigint,  
                 hunger: results[2] as bigint,  
                 sickness: results[3] as bigint,
-                alive: results[4] as boolean
+                alive: results[4] as boolean,
+                network: tokens[i].network as string
             });
         }
     }
@@ -146,21 +153,21 @@ export default function LinkieList() {
     const [ selectedLinkie, setSelectedLinkie ] = useState<LinkieStats | undefined>(undefined);
 
     const { address } = useAccount();
-    const ownedLinkieIds = QueryOwnedLinkieIds(address?.toString());
-    const linkieStats = QueryLinkieStats(ownedLinkieIds);
+    const ownedTokens = QueryOwnedTokens(address?.toString());
+    const linkieStats = QueryLinkieStats(ownedTokens);
 
     if(selectedLinkie == undefined && linkieStats?.length > 0) {
         setSelectedLinkie(linkieStats[0]);
     }
 
     const cards = () => {
-        if(linkieStats != undefined && ownedLinkieIds != undefined && linkieStats.length > 0) {
+        if(linkieStats != undefined && ownedTokens != undefined && linkieStats.length > 0) {
             return (
-                ownedLinkieIds?.map((tokenId: BigInt, index: number) => (
-                    <div style={cardStyle(tokenId)} onClick={() => (setSelectedLinkie(linkieStats[index]))} key={index}>
+                ownedTokens?.map((token: SubgraphToken, index: number) => (
+                    <div style={cardStyle(token.tokenId)} onClick={() => (setSelectedLinkie(linkieStats[index]))} key={index}>
                         <img src={linkieStats[index].lifeCycle + "_" + linkieStats[index].species + ".png"} style={imgStyle}></img>
                         <div style={textStyle}>
-                            Linkie #{tokenId.toString()}
+                            Linkie #{token.tokenId.toString()}
                         </div>
                     </div>         
                 ))

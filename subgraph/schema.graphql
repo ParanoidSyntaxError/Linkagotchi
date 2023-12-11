@@ -7,4 +7,5 @@ type Token @entity {
   id: Bytes!
   tokenId: BigInt!
   owner: Bytes!
+  network: String!
 }

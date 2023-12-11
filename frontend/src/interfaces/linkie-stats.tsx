@@ -4,5 +4,6 @@ export default interface LinkieStats {
     species: bigint,
     hunger: bigint,
     sickness: bigint,
-    alive: boolean
+    alive: boolean,
+    network: string
 }

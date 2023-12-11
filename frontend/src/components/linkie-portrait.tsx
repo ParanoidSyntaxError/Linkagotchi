@@ -66,6 +66,9 @@ function LinkiePortrait(linkie: LinkieStats | undefined) {
                     <div style={statStyle}>
                         {"Sickness: " + linkie?.sickness.toString()}
                     </div>
+                    <div style={statStyle}>
+                        {"Network: " + linkie?.network.toString()}
+                    </div>
                 </Stack>
             </div>
         </div>
