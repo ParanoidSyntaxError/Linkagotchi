@@ -55,7 +55,7 @@ export default function FeedButton(text: string, fontSize: string, width: string
         address: "0x326C977E6efc84E512bB9C30f76E30c160eD06FB",
         abi: transferAndCallAbi,
         args: [
-            "0x1993aD4D968664b96c613173C785ba860c1100dB", 
+            "0xef3E58DEAd252D80e95edf19CfFB268637090A4a", 
             110000,
             encodedArgs
         ],

@@ -7,7 +7,7 @@ dataSources:
     network: mumbai
     source:
       abi: LinkieCCIP
-      address: "0xbD4d23c124B697C2494F4546f356453D907A4056"
+      address: "0x3D2B691B2F2FcC96f693957bE27ED7809fC912a7"
       startBlock: 43388737
     mapping:
       kind: ethereum/events

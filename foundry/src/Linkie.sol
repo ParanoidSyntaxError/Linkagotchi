@@ -214,6 +214,7 @@ contract Linkie is ILinkie, ERC721Enumerable, VRFConsumerBaseV2, Ownable {
     */
     function tokenURI(uint256 id) public view override returns (string memory) {
         _requireMinted(id);
+        require(_tokens[id].lifeCycleBlockstamp > 0);
          
         return string(abi.encodePacked(
             'data:application/json;base64,',
@@ -238,10 +239,6 @@ contract Linkie is ILinkie, ERC721Enumerable, VRFConsumerBaseV2, Ownable {
     */
     function withdraw(address token, address receiver, uint256 amount) external onlyOwner {
         IERC20(token).transfer(receiver, amount);
-    }
-
-    function _token(uint256 id) internal view returns (TokenData memory tokenData) {
-        return _tokens[id];
     }
 
     function _randomSpecies(uint256 lifeCycle, uint256 random) internal view returns (uint256) {
@@ -355,30 +352,26 @@ contract Linkie is ILinkie, ERC721Enumerable, VRFConsumerBaseV2, Ownable {
     }
 
     function _tokenSvgHash(uint256 id) internal view returns (bytes memory) {
-        if(_tokens[id].hungerTimestamp == 0) {
-            return hex"00";
-        }
-
-        if(_tokens[id].lifeCycle == 0) { // Baby
-            if(_tokens[id].species == 0) {
+        if(_lifeCycle(id) == 0) { // Baby
+            if(_species(id) == 0) {
                 return hex"00D61500C71200A53100AB3100A71100A911009611008711007811008911009A11";
             }
-        } else if(_tokens[id].species == 1) { // Child
-            if(_tokens[id].species == 0) {
+        } else if(_lifeCycle(id) == 1) { // Child
+            if(_species(id) == 0) {
                 return hex"00D51600A43100AB3100C81200B61100A811009512009912008712";
-            } else if(_tokens[id].species == 1) {
+            } else if(_species(id) == 1) {
                 return hex"00D61400C51100CA1100B71200A61100981100A42100AB21009511008611007712008911009A11";
             }
-        } else if(_tokens[id].species == 1) { // Teen
-            if(_tokens[id].species == 0) {
+        } else if(_lifeCycle(id) == 1) { // Teen
+            if(_species(id) == 0) {
                 return hex"00C51600D61100D911008441008B41009C1100931100A612008611009911007516";
-            } else if(_tokens[id].species == 1) {
+            } else if(_species(id) == 1) {
                 return hex"00C61500A81200D61100DA11008711007911007551006615007B51009C11009411";
             }
-        } else if(_tokens[id].species == 1) { // Adult
-            if(_tokens[id].species == 0) {
+        } else if(_lifeCycle(id) == 1) { // Adult
+            if(_species(id) == 0) {
                 return hex"00C51600D61100D91100943100A311009B3100AC11008511007614008A1100961100881100A712";
-            } else if(_tokens[id].species == 1) {
+            } else if(_species(id) == 1) {
                 return hex"00C51600D61100D911008441008B4100751200871200791200991100A61100B81200AC1100A311";
             }
         }
@@ -387,10 +380,6 @@ contract Linkie is ILinkie, ERC721Enumerable, VRFConsumerBaseV2, Ownable {
     }
     
     function _tokenAttributes(uint256 id) internal view returns (string memory) {
-        if(_tokens[id].hungerTimestamp == 0) {
-            return "[]";
-        }
-
         string memory attributes = string(abi.encodePacked(
             '{"trait_type":"Life cycle","value":"',
             Strings.toString(_lifeCycle(id)),

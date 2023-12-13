@@ -238,6 +238,35 @@ interface IERC20 {
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
 }
 
+// OpenZeppelin Contracts (last updated v4.8.0) (token/ERC721/extensions/ERC721Enumerable.sol)
+
+// OpenZeppelin Contracts (last updated v4.9.0) (token/ERC721/ERC721.sol)
+
+// OpenZeppelin Contracts (last updated v4.9.0) (token/ERC721/IERC721.sol)
+
+// OpenZeppelin Contracts v4.4.1 (utils/introspection/IERC165.sol)
+
+/**
+ * @dev Interface of the ERC165 standard, as defined in the
+ * https://eips.ethereum.org/EIPS/eip-165[EIP].
+ *
+ * Implementers can declare support of contract interfaces, which can then be
+ * queried by others ({ERC165Checker}).
+ *
+ * For an implementation, see {ERC165}.
+ */
+interface IERC165 {
+    /**
+     * @dev Returns true if this contract implements the interface defined by
+     * `interfaceId`. See the corresponding
+     * https://eips.ethereum.org/EIPS/eip-165#how-interfaces-are-identified[EIP section]
+     * to learn more about how these ids are created.
+     *
+     * This function call must use less than 30 000 gas.
+     */
+    function supportsInterface(bytes4 interfaceId) external view returns (bool);
+}
+
 /**
  * @dev Required interface of an ERC721 compliant contract.
  */
@@ -2444,6 +2473,7 @@ contract Linkie is ILinkie, ERC721Enumerable, VRFConsumerBaseV2, Ownable {
     */
     function tokenURI(uint256 id) public view override returns (string memory) {
         _requireMinted(id);
+        require(_tokens[id].lifeCycleBlockstamp > 0);
          
         return string(abi.encodePacked(
             'data:application/json;base64,',
@@ -2468,10 +2498,6 @@ contract Linkie is ILinkie, ERC721Enumerable, VRFConsumerBaseV2, Ownable {
     */
     function withdraw(address token, address receiver, uint256 amount) external onlyOwner {
         IERC20(token).transfer(receiver, amount);
-    }
-
-    function _token(uint256 id) internal view returns (TokenData memory tokenData) {
-        return _tokens[id];
     }
 
     function _randomSpecies(uint256 lifeCycle, uint256 random) internal view returns (uint256) {
@@ -2585,30 +2611,26 @@ contract Linkie is ILinkie, ERC721Enumerable, VRFConsumerBaseV2, Ownable {
     }
 
     function _tokenSvgHash(uint256 id) internal view returns (bytes memory) {
-        if(_tokens[id].hungerTimestamp == 0) {
-            return hex"00";
-        }
-
-        if(_tokens[id].lifeCycle == 0) { // Baby
-            if(_tokens[id].species == 0) {
+        if(_lifeCycle(id) == 0) { // Baby
+            if(_species(id) == 0) {
                 return hex"00D61500C71200A53100AB3100A71100A911009611008711007811008911009A11";
             }
-        } else if(_tokens[id].species == 1) { // Child
-            if(_tokens[id].species == 0) {
+        } else if(_lifeCycle(id) == 1) { // Child
+            if(_species(id) == 0) {
                 return hex"00D51600A43100AB3100C81200B61100A811009512009912008712";
-            } else if(_tokens[id].species == 1) {
+            } else if(_species(id) == 1) {
                 return hex"00D61400C51100CA1100B71200A61100981100A42100AB21009511008611007712008911009A11";
             }
-        } else if(_tokens[id].species == 1) { // Teen
-            if(_tokens[id].species == 0) {
+        } else if(_lifeCycle(id) == 1) { // Teen
+            if(_species(id) == 0) {
                 return hex"00C51600D61100D911008441008B41009C1100931100A612008611009911007516";
-            } else if(_tokens[id].species == 1) {
+            } else if(_species(id) == 1) {
                 return hex"00C61500A81200D61100DA11008711007911007551006615007B51009C11009411";
             }
-        } else if(_tokens[id].species == 1) { // Adult
-            if(_tokens[id].species == 0) {
+        } else if(_lifeCycle(id) == 1) { // Adult
+            if(_species(id) == 0) {
                 return hex"00C51600D61100D91100943100A311009B3100AC11008511007614008A1100961100881100A712";
-            } else if(_tokens[id].species == 1) {
+            } else if(_species(id) == 1) {
                 return hex"00C51600D61100D911008441008B4100751200871200791200991100A61100B81200AC1100A311";
             }
         }
@@ -2617,10 +2639,6 @@ contract Linkie is ILinkie, ERC721Enumerable, VRFConsumerBaseV2, Ownable {
     }
     
     function _tokenAttributes(uint256 id) internal view returns (string memory) {
-        if(_tokens[id].hungerTimestamp == 0) {
-            return "[]";
-        }
-
         string memory attributes = string(abi.encodePacked(
             '{"trait_type":"Life cycle","value":"',
             Strings.toString(_lifeCycle(id)),
@@ -2726,11 +2744,9 @@ contract LinkieCCIP is ILinkieCCIP, CCIPReceiver, Linkie {
 
         _burn(id);
         
-        TokenData memory tokenData = _token(id);
-
         TokenState memory tokenState = TokenState(
-            tokenData.lifeCycle, 
-            tokenData.species,
+            _lifeCycle(id), 
+            _species(id),
             _sickness(id),
             _hunger(id)
         );

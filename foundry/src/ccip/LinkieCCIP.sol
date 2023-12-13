@@ -73,11 +73,9 @@ contract LinkieCCIP is ILinkieCCIP, CCIPReceiver, Linkie {
 
         _burn(id);
         
-        TokenData memory tokenData = _token(id);
-
         TokenState memory tokenState = TokenState(
-            tokenData.lifeCycle, 
-            tokenData.species,
+            _lifeCycle(id), 
+            _species(id),
             _sickness(id),
             _hunger(id)
         );

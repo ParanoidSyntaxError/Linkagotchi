@@ -44,7 +44,7 @@ function QueryLinkieStats(tokens: SubgraphToken[]) {
     let contractReads: any = [];
     for(let i = 0; i < tokens.length; i++) {
         contractReads.push({
-            address: "0xbD4d23c124B697C2494F4546f356453D907A4056",
+            address: "0x3D2B691B2F2FcC96f693957bE27ED7809fC912a7",
             abi: [{
                 "inputs": [
                     {
@@ -128,7 +128,8 @@ export default function LinkieList() {
             padding: "0.5rem",
             borderRadius: "0.5rem",
             cursor: "pointer",
-            border: "black solid 0.25rem"
+            border: "black solid 0.25rem",
+            margin: "0.5rem 0"
         };
         
         if(selectedLinkie?.tokenId == tokenId) {
@@ -177,7 +178,7 @@ export default function LinkieList() {
 
     return {
         view: <div style={rootStyle}>
-            <Stack margin="1rem 0" rowGap="1rem" columnGap="1rem" alignItems="center" sx={{
+            <Stack columnGap="1rem" alignItems="center" sx={{
                 width: "100%",
                 height: "100%",
                 overflowY: "scroll",

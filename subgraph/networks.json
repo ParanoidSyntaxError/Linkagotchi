@@ -1,14 +1,14 @@
 {
   "mumbai": {
     "LinkieCCIP": {
-      "address": "0xbD4d23c124B697C2494F4546f356453D907A4056",
+      "address": "0x3D2B691B2F2FcC96f693957bE27ED7809fC912a7",
       "startBlock": 43388737
     }
   },
   "fuji": {
     "LinkieCCIP": {
-      "address": "0xcE1b7cfcc25249f0B1d8f2C49D6B8A97f0B27360",
-      "startBlock": 28462260
+      "address": "",
+      "startBlock": 0
     }
   }
 }
